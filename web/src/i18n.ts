@@ -9,11 +9,13 @@ export const WEB_MESSAGES = {
     "tab.appendices": "Appendices",
     "tab.reviews": "Review Items",
     "tab.figures": "Figures",
+    "tab.references": "References",
     "diff.label": "Diff Baseline",
     "diff.last_checkpoint": "Last Checkpoint",
     "diff.resolution_snapshot": "Resolution Snapshot",
     "diff.submission_milestone": "Submission Milestone",
-    "empty.workspace": "Connect a Manuscript Workspace via `omm serve` to start outlining and reviewing.",
+    "empty.workspace":
+      "Initialize or register a Manuscript Workspace (omm init / omm register) to start outlining and reviewing.",
   },
   "zh-CN": {
     "app.title": "oh-my-manuscript",
@@ -23,17 +25,25 @@ export const WEB_MESSAGES = {
     "tab.appendices": "附录",
     "tab.reviews": "审稿追踪项",
     "tab.figures": "图表总览",
+    "tab.references": "参考文献",
     "diff.label": "对比基准",
     "diff.last_checkpoint": "上一审阅点",
     "diff.resolution_snapshot": "单条批注快照",
     "diff.submission_milestone": "投稿里程碑",
-    "empty.workspace": "通过 `omm serve` 连接手稿工作区后即可开始大纲创制与审阅批注。",
+    "empty.workspace":
+      "初始化或登记手稿工作区（omm init / omm register）后即可开始大纲创制与审阅批注。",
   },
 } as const;
 
 export type MessageKey = keyof (typeof WEB_MESSAGES)["en"];
 
 export function detectBrowserLocale(): Locale {
+  if (typeof window !== "undefined") {
+    const param = new URLSearchParams(window.location.search).get("lang");
+    if (param === "en" || param === "zh-CN") {
+      return param;
+    }
+  }
   if (typeof navigator !== "undefined" && navigator.language.toLowerCase().startsWith("zh")) {
     return "zh-CN";
   }

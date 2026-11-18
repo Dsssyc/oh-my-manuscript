@@ -18,20 +18,24 @@ English | [简体中文](./README.zh-CN.md)
 
 ## Planned `0.1` Workflow
 
-- `omm init` — Initialize a Git-backed **Manuscript Workspace** (`manuscript.toml`, sectioned **Structured Source**, `references.bib`, `.omm/`).
-- `omm serve` — Launch the local live-reloading workbench (multi-tab navigation for Manuscript / Appendices / Review Responses / Figures, three-tier **Checkpoint** diffing, and universal **Annotation** tools).
-- `omm check` — Validate unresolved **Outline Blocks**, open **Annotations**, broken `block_id` or citation references, terminology consistency, and journal constraints.
-- `omm build` — Run **Target Compilers** against the current tree (and optional **Submission Milestone** tag) to emit submission-ready `.docx` or `.tex` packages with resolved page/line numbers.
+`oh-my-manuscript` installs once into a shared global Agent Skill (`~/.agents/skills/oh-my-manuscript`, with automatic directory links for installed coding agents and a single-instance loopback workbench at `127.0.0.1:49638`), while keeping every paper's **Manuscript Workspace** self-contained inside its own Git repository:
 
-See [docs/GLOSSARY.md](./docs/GLOSSARY.md) for canonical bilingual domain terms.
+- `uvx oh-my-manuscript@<version> install` — Materialize the isolated runtime and shared Agent Skill (`~/.agents/skills/oh-my-manuscript/scripts/omm`).
+- `omm init` / `omm register` / `omm relocate` — Initialize or register a Git-backed **Manuscript Workspace** (`manuscript.toml`, sectioned **Structured Source**, `references.bib`, `.omm/`).
+- `omm console` — Ensure the single-instance loopback workbench daemon is running and print its fixed local URL (five top-level views: Manuscript / Appendices / Review Items / Figures / References, three-tier **Checkpoint** diffing, and universal **Annotation** tools).
+- `omm stamp` / `omm sync` — Stamp persistent `{#block_id}` anchors onto new blocks and publish a verified Git `revision` to switch the workbench view atomically without mid-edit flicker.
+- `omm check` — Validate unexpanded **Outline Blocks**, open **Annotations**, broken `block_id` or citation references, and journal constraints.
+- `omm build` — Run **Target Compilers** against the published tree (and optional **Submission Milestone** tag) to emit submission-ready `.docx` or `.tex` packages with resolved page/line numbers.
+
+See [docs/GLOSSARY.md](./docs/GLOSSARY.md) for canonical bilingual domain terms, and [ADR-001](./docs/adr/ADR-001-core-representation-and-contracts.md) / [ADR-002](./docs/adr/ADR-002-global-skill-runtime-and-daemon-contract.md) for architectural contracts.
 
 ---
 
 ## Project Status & Verification Boundary
 
-> **Status (`0.1.0-dev` — Initial Scaffold)**:
-> - **Implemented & Verified**: Python package & `omm` CLI entry point (`uv` + `pytest`), bilingual (`en` / `zh-CN`) i18n catalog, and Vite + React + TypeScript workbench shell (`tsc` + build).
-> - **Not Yet Implemented (`0.1` Roadmap)**: Structured Source parser & `block_id` indexer, SSE/WebSocket live workbench server & annotation store, Git Checkpoint diff engine, and Word (`.docx` OOXML/OMML/Track Changes) & LaTeX (`.tex`) Target Compilers. Legacy external `.docx` ingestion (`ingest`) is deferred to `0.2`.
+> **Status (`0.1.0-dev` — Core Contracts Adopted, Implementation Pending)**:
+> - **Implemented & Verified**: Python package & `omm` CLI skeleton (`uv` + `pytest`), bilingual (`en` / `zh-CN`) i18n catalog, five-tab Vite + React + TypeScript workbench shell (`tsc` + build), and foundational architecture contracts (`ADR-001` & `ADR-002`).
+> - **Not Yet Implemented (`0.1` Roadmap)**: Shared Skill installer & single-instance loopback daemon, Structured Source AST parser & `(revision, block_id)` `sync` engine, `.omm/annotations.json` store & Git Checkpoint diff engine, and Word (`.docx` OOXML/OMML/Track Changes) & LaTeX (`.tex`) Target Compilers. Legacy external `.docx` ingestion (`ingest`) is deferred to `0.2`.
 
 ---
 
