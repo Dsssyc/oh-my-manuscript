@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from omm import ast
+from omm.annotations import load_annotations
 from omm.bib import load_bib
 from omm.errors import Diagnostic, OmmError
 from omm.parser import parse_file
-from omm.workspace import ANNOTATIONS, Workspace, load_workspace, read_text
+from omm.workspace import ANNOTATIONS, Workspace, load_workspace
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,55 +29,21 @@ class CheckResult:
 
 
 def _check_annotations(workspace: Workspace) -> list[Diagnostic]:
-    path = workspace.root / ANNOTATIONS
     try:
-        data = json.loads(read_text(workspace.resolve(ANNOTATIONS.as_posix())))
-        if (
-            not isinstance(data, dict)
-            or set(data) != {"schema_version", "items"}
-            or type(data["schema_version"]) is not int
-            or data["schema_version"] != 1
-            or not isinstance(data["items"], list)
-        ):
-            raise ValueError
-        diagnostics = []
-        for item in data["items"]:
-            if not isinstance(item, dict) or "state" in item or "status" in item:
-                raise TypeError
-            block_id = item.get("block_id")
-            annotation_id = item.get("id")
-            resolutions = item.get("resolutions")
-            if (
-                not isinstance(block_id, str)
-                or not isinstance(annotation_id, str)
-                or not isinstance(resolutions, list)
-            ):
-                raise TypeError
-            for record in resolutions:
-                if (
-                    not isinstance(record, dict)
-                    or "reopened_at" not in record
-                    or (
-                        record["reopened_at"] is not None
-                        and not isinstance(record["reopened_at"], str)
-                    )
-                ):
-                    raise ValueError
-            if not resolutions or resolutions[-1]["reopened_at"] is not None:
-                diagnostics.append(
-                    Diagnostic(
-                        "ERR_ANNOTATION_OPEN",
-                        path,
-                        block_id=block_id,
-                        severity="warning",
-                        params={"id": annotation_id},
-                    )
-                )
-        return diagnostics
-    except (TypeError, ValueError):
-        return [Diagnostic("ERR_ANNOTATIONS_INVALID", path)]
+        annotations = load_annotations(workspace.root)
     except OmmError as exc:
         return [exc.diagnostic]
+    return [
+        Diagnostic(
+            "ERR_ANNOTATION_OPEN",
+            workspace.root / ANNOTATIONS,
+            block_id=ann.block_id,
+            severity="warning",
+            params={"id": ann.id},
+        )
+        for ann in annotations
+        if ann.status == "open"
+    ]
 
 
 class _Checker:

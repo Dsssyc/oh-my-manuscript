@@ -378,22 +378,40 @@ and [#loc:p-first..p-second]. {#p-reply}
 :::
 """,
     )
+    open_annotation = {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "block_id": "p-first",
+        "base_rev": "a" * 40,
+        "selector": {"kind": "block"},
+        "comment": "Clarify the first result.",
+        "created_at": "2026-11-18T00:00:00Z",
+        "before_block_md": "First.",
+        "resolutions": [],
+    }
+    resolution = {
+        "resolved_at": "2026-11-18T00:01:00Z",
+        "after_rev": "b" * 40,
+        "after_block_md": "Revised.",
+        "reopened_at": None,
+    }
     write(
         root / ".omm" / "annotations.json",
         json.dumps(
             {
                 "schema_version": 1,
                 "items": [
-                    {"id": "open", "block_id": "p-first", "resolutions": []},
+                    open_annotation,
                     {
-                        "id": "resolved",
-                        "block_id": "p-first",
-                        "resolutions": [{"reopened_at": None}],
+                        **open_annotation,
+                        "id": "550e8400-e29b-41d4-a716-446655440001",
+                        "resolutions": [resolution],
                     },
                     {
-                        "id": "reopened",
+                        **open_annotation,
+                        "id": "550e8400-e29b-41d4-a716-446655440002",
                         "block_id": "p-second",
-                        "resolutions": [{"reopened_at": "2026-11-18T00:00:00Z"}],
+                        "before_block_md": "Second.",
+                        "resolutions": [{**resolution, "reopened_at": "2026-11-18T00:02:00Z"}],
                     },
                 ],
             }
@@ -427,6 +445,14 @@ and [#loc:p-first..p-second]. {#p-reply}
         "ERR_OUTLINE_UNEXPANDED",
         "ERR_ANNOTATION_OPEN",
     }
+    assert [
+        (issue.block_id, issue.params["id"])
+        for issue in result.diagnostics
+        if issue.code == "ERR_ANNOTATION_OPEN"
+    ] == [
+        ("p-first", open_annotation["id"]),
+        ("p-second", "550e8400-e29b-41d4-a716-446655440002"),
+    ]
 
 
 def test_stamp_preflights_duplicate_ids_across_the_workspace(tmp_path: Path) -> None:

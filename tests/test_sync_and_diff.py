@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -71,8 +72,24 @@ def test_sync_unborn_repository_and_warnings(repo: Path) -> None:
     write(
         repo,
         ANNOTATIONS.as_posix(),
-        '{"schema_version":1,"items":[{"id":"note","block_id":"sec-introduction",'
-        '"resolutions":[]}]}\n',
+        json.dumps(
+            {
+                "schema_version": 1,
+                "items": [
+                    {
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "block_id": "sec-introduction",
+                        "base_rev": "a" * 40,
+                        "selector": {"kind": "block"},
+                        "comment": "Review the introduction.",
+                        "created_at": "2026-11-18T00:00:00Z",
+                        "before_block_md": "# Introduction",
+                        "resolutions": [],
+                    }
+                ],
+            }
+        )
+        + "\n",
     )
     with pytest.raises(OmmError, match="^ERR_NO_PUBLISHED_REVISION$"):
         mark_checkpoint(repo)

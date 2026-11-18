@@ -3,14 +3,33 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
+from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 
 from omm import __version__
+from omm.annotations import (
+    Annotation,
+    BlockContext,
+    create_annotation,
+    delete_annotation,
+    list_annotations,
+    reopen_annotation,
+    resolve_annotation,
+)
 from omm.checker import check_workspace
 from omm.errors import Diagnostic, OmmError
+from omm.git_revs import (
+    PUBLISHED_REF,
+    _Repository,
+    lookup_block_at_revision,
+    mark_checkpoint,
+    resolve_revision,
+    sync_workspace,
+)
 from omm.i18n import Locale, detect_locale, t
 from omm.stamp import stamp_workspace
 from omm.workspace import init_workspace, register_workspace, relocate_workspace
@@ -34,7 +53,16 @@ COMMANDS: tuple[str, ...] = (
     "stop",
 )
 
-_WORKSPACE_COMMANDS = {"init", "register", "relocate", "stamp", "check"}
+_WORKSPACE_COMMANDS = {
+    "init",
+    "register",
+    "relocate",
+    "stamp",
+    "sync",
+    "check",
+    "checkpoint",
+    "annotate",
+}
 
 
 def _preparse_locale(argv: Sequence[str]) -> Locale:
@@ -74,6 +102,62 @@ class _LocalizedParser(argparse.ArgumentParser):
         self.exit(2, t("cli.arguments_error", self.locale, detail=message) + "\n")
 
 
+def _add_subcommand_options(
+    parser: argparse.ArgumentParser, locale: Locale, *, workspace: bool
+) -> None:
+    parser.add_argument(
+        "--lang",
+        choices=("en", "zh-CN"),
+        default=argparse.SUPPRESS,
+        help=t("cli.lang_help", locale),
+    )
+    if workspace:
+        parser.add_argument(
+            "--cwd", type=Path, default=argparse.SUPPRESS, help=t("cli.cwd_help", locale)
+        )
+
+
+def _add_json_option(parser: argparse.ArgumentParser, locale: Locale) -> None:
+    parser.add_argument("--json", action="store_true", help=t("cli.json_help", locale))
+
+
+def _add_annotation_actions(parser: argparse.ArgumentParser, locale: Locale) -> None:
+    parser.set_defaults(annotate_parser=parser)
+    actions = parser.add_subparsers(
+        dest="action", parser_class=partial(_LocalizedParser, locale=locale)
+    )
+    for action in ("list", "create", "resolve", "reopen", "delete"):
+        help_text = t(f"cmd.annotate.{action}.help", locale)
+        subparser = actions.add_parser(action, help=help_text, description=help_text)
+        _add_subcommand_options(subparser, locale, workspace=True)
+        _add_json_option(subparser, locale)
+        if action == "list":
+            subparser.add_argument(
+                "--status",
+                choices=("open", "resolved"),
+                help=t("cli.annotation_status_help", locale),
+            )
+            subparser.add_argument("--block-id", help=t("cli.annotation_block_id_help", locale))
+        elif action == "create":
+            subparser.add_argument(
+                "--block-id", required=True, help=t("cli.annotation_block_id_help", locale)
+            )
+            subparser.add_argument(
+                "--comment", required=True, help=t("cli.annotation_comment_help", locale)
+            )
+            subparser.add_argument("--base-rev", help=t("cli.annotation_base_rev_help", locale))
+            subparser.add_argument(
+                "--selector-json", help=t("cli.annotation_selector_help", locale)
+            )
+            subparser.add_argument("--id", help=t("cli.annotation_id_help", locale))
+        else:
+            subparser.add_argument("id", help=t("cli.annotation_id_help", locale))
+            if action == "resolve":
+                subparser.add_argument(
+                    "--after-rev", help=t("cli.annotation_after_rev_help", locale)
+                )
+
+
 def build_parser(locale: Locale) -> argparse.ArgumentParser:
     parser = _LocalizedParser(
         locale=locale,
@@ -92,16 +176,7 @@ def build_parser(locale: Locale) -> argparse.ArgumentParser:
     for command in COMMANDS:
         help_text = t(f"cmd.{command}.help", locale)
         subparser = subparsers.add_parser(command, help=help_text, description=help_text)
-        subparser.add_argument(
-            "--lang",
-            choices=("en", "zh-CN"),
-            default=argparse.SUPPRESS,
-            help=t("cli.lang_help", locale),
-        )
-        if command in _WORKSPACE_COMMANDS:
-            subparser.add_argument(
-                "--cwd", type=Path, default=argparse.SUPPRESS, help=t("cli.cwd_help", locale)
-            )
+        _add_subcommand_options(subparser, locale, workspace=command in _WORKSPACE_COMMANDS)
         if command == "init":
             subparser.add_argument(
                 "--title", default=t("cli.default_title", locale), help=t("cli.title_help", locale)
@@ -110,6 +185,14 @@ def build_parser(locale: Locale) -> argparse.ArgumentParser:
             subparser.add_argument(
                 "--replace", action="store_true", help=t("cli.replace_help", locale)
             )
+        if command == "sync":
+            subparser.add_argument("--expected-rev", help=t("cli.expected_rev_help", locale))
+            _add_json_option(subparser, locale)
+        if command == "checkpoint":
+            subparser.add_argument("--revision", help=t("cli.checkpoint_revision_help", locale))
+            _add_json_option(subparser, locale)
+        if command == "annotate":
+            _add_annotation_actions(subparser, locale)
     return parser
 
 
@@ -124,6 +207,100 @@ def _print_diagnostic(diagnostic: Diagnostic, locale: Locale) -> None:
     severity = t(f"cli.{diagnostic.severity}", locale)
     message = t(diagnostic.code, locale, **dict(diagnostic.params))
     print(f"{location}{severity} {diagnostic.code}{block_id}: {message}", file=sys.stderr)
+
+
+def _print_json(value: object) -> None:
+    print(json.dumps(value, ensure_ascii=False))
+
+
+def _annotation_json(annotation: Annotation) -> dict[str, object]:
+    return {**asdict(annotation), "status": annotation.status}
+
+
+def _annotation_revision(root: Path, rev_or_ref: str | None) -> str:
+    if rev_or_ref is not None:
+        return resolve_revision(root, rev_or_ref)
+    try:
+        return resolve_revision(root, PUBLISHED_REF)
+    except OmmError as exc:
+        if exc.code == "ERR_REVISION_NOT_FOUND":
+            raise OmmError("ERR_NO_PUBLISHED_REVISION", path=root) from exc
+        raise
+
+
+def _annotation_selector(raw: str | None, block_id: str) -> dict[str, object]:
+    if raw is None:
+        return {"kind": "block"}
+    try:
+        selector = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise OmmError("ERR_ANNOTATION_SELECTOR_MISMATCH", block_id=block_id) from exc
+    if not isinstance(selector, dict):
+        raise OmmError("ERR_ANNOTATION_SELECTOR_MISMATCH", block_id=block_id)
+    return selector
+
+
+def _run_annotate(root: Path, args: argparse.Namespace, locale: Locale) -> int:
+    def lookup(revision: str, block_id: str) -> BlockContext | None:
+        entry = lookup_block_at_revision(root, revision, block_id)
+        return None if entry is None else BlockContext(entry.block, entry.asset_sha256)
+
+    match args.action:
+        case None:
+            args.annotate_parser.print_help()
+            return 2
+        case "list":
+            annotations = list_annotations(root, status=args.status, block_id=args.block_id)
+            if args.json:
+                _print_json([_annotation_json(ann) for ann in annotations])
+            elif not annotations:
+                print(t("cli.annotation_empty", locale))
+            else:
+                for ann in annotations:
+                    status = t(f"cli.annotation_status.{ann.status}", locale)
+                    print(
+                        t(
+                            "cli.annotation_row",
+                            locale,
+                            id=ann.id,
+                            block_id=ann.block_id,
+                            status=status,
+                            comment=ann.comment,
+                        )
+                    )
+            return 0
+        case "create":
+            annotation = create_annotation(
+                root,
+                block_id=args.block_id,
+                base_rev=_annotation_revision(root, args.base_rev),
+                selector=_annotation_selector(args.selector_json, args.block_id),
+                comment=args.comment,
+                lookup=lookup,
+                annotation_id=args.id,
+            )
+        case "resolve":
+            after_rev = _annotation_revision(root, args.after_rev)
+            if args.after_rev is not None:
+                published = _annotation_revision(root, None)
+                if not _Repository(root).is_ancestor(after_rev, published):
+                    raise OmmError("ERR_REVISION_NOT_PUBLISHED", path=root, revision=after_rev)
+            annotation = resolve_annotation(root, args.id, after_rev=after_rev, lookup=lookup)
+        case "reopen":
+            annotation = reopen_annotation(root, args.id)
+        case "delete":
+            delete_annotation(root, args.id)
+            if args.json:
+                _print_json({"id": args.id})
+            else:
+                print(t("cli.annotation_deleted", locale, id=args.id))
+            return 0
+
+    if args.json:
+        _print_json(_annotation_json(annotation))
+    else:
+        print(t(f"cli.annotation_{args.action}_ok", locale, id=annotation.id))
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -152,6 +329,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(t("cli.relocated", locale, path=workspace.root))
             case "stamp":
                 print(t("cli.stamped", locale, count=stamp_workspace(root)))
+            case "sync":
+                result = sync_workspace(root, expected_old_rev=args.expected_rev)
+                if args.json:
+                    _print_json({"revision": result.revision, "changed": result.changed})
+                else:
+                    message = "cli.sync_changed" if result.changed else "cli.sync_unchanged"
+                    print(t(message, locale, revision=result.revision))
             case "check":
                 result = check_workspace(root)
                 for diagnostic in result.diagnostics:
@@ -159,6 +343,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not result.ok:
                     return 1
                 print(t("cli.check_ok", locale))
+            case "checkpoint":
+                checkpoint = mark_checkpoint(root, revision=args.revision)
+                if args.json:
+                    _print_json({"checkpoint": checkpoint})
+                else:
+                    print(t("cli.checkpoint_set", locale, checkpoint=checkpoint))
+            case "annotate":
+                return _run_annotate(root, args, locale)
     except OmmError as exc:
         _print_diagnostic(exc.diagnostic, locale)
         return 1
