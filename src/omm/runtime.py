@@ -503,6 +503,34 @@ def _link_skill(path: Path, skill: Path) -> None:
         raise OmmError("ERR_FILE_WRITE", path=path, detail=str(exc)) from exc
 
 
+def _link_runtime(scripts: Path, runtime: Path) -> None:
+    """Point scripts/.runtime at the active runtime directory."""
+    link = scripts / ".runtime"
+    if os.path.lexists(link) or link.is_junction():
+        if not (link.is_symlink() or link.is_junction()):
+            raise OmmError("ERR_FILE_WRITE", path=link, detail="not a runtime link")
+        # Replace the previous runtime link; a junction needs rmdir, not unlink.
+        if link.is_junction():
+            link.rmdir()
+        else:
+            link.unlink()
+    try:
+        if os.name == "nt":
+            # Quoted environment expansions avoid interpreting path characters as cmd syntax.
+            subprocess.run(
+                'cmd.exe /d /v:off /s /c "mklink /J "%OMM_LINK%" "%OMM_LINK_TARGET%""',
+                env={**os.environ, "OMM_LINK": str(link), "OMM_LINK_TARGET": str(runtime)},
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=True,
+            )
+        else:
+            os.symlink(runtime, link, target_is_directory=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise OmmError("ERR_FILE_WRITE", path=link, detail=str(exc)) from exc
+
+
 def _write_skill(skill: Path, source: Path, ready: dict, links: list[Path]) -> None:
     for relative in (Path("SKILL.md"), Path("references", "syntax-and-cli.md")):
         path = skill / relative
@@ -510,15 +538,19 @@ def _write_skill(skill: Path, source: Path, ready: dict, links: list[Path]) -> N
         atomic_write_text(path, (source / "skill_bundle" / relative).read_bytes().decode("utf-8"))
     scripts = skill / "scripts"
     scripts.mkdir(exist_ok=True)
+    # cmd.exe decodes .cmd files with the console code page, so omm.cmd must
+    # stay pure 7-bit ASCII: %~dp0 expands to its own Unicode directory and
+    # reaches the interpreter through the co-located .runtime link.
+    _link_runtime(scripts, runtime_root() / "runtimes" / ready["runtime_id"])
     python = ready["python"]
     shell_python = re.sub(r'([\\`"$])', r"\\\1", python)
     atomic_write_text(
         scripts / "omm", f'#!/bin/sh\nexec "{shell_python}" -m omm.cli "$@"\n', mode=0o755
     )
-    cmd_python = python.replace("%", "%%")
     atomic_write_text(
         scripts / "omm.cmd",
-        f'@echo off\r\n"{cmd_python}" -X utf8 -m omm.cli %*\r\nexit /b %ERRORLEVEL%\r\n',
+        '@echo off\r\n"%~dp0.runtime\\venv\\Scripts\\python.exe" -X utf8 -m omm.cli %*\r\n'
+        "exit /b %ERRORLEVEL%\r\n",
     )
     write_json_object(
         skill / "skill.json",

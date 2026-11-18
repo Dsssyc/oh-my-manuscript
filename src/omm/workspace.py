@@ -439,6 +439,7 @@ def init_workspace(
                     check=True,
                     capture_output=True,
                     env=git_env,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
             except (OSError, subprocess.CalledProcessError) as exc:
                 raise OmmError("ERR_GIT_INIT", path=root) from exc

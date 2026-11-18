@@ -676,6 +676,7 @@ def _workspace_at(repo: _Repository, revision: str) -> Workspace:
 
 class _WorkbenchHandler(BaseHTTPRequestHandler):
     server: WorkbenchServer
+    _body_consumed = False
 
     def log_message(self, format: str, *args: object) -> None:
         # Paths and query strings can contain private manuscript details.
@@ -692,6 +693,7 @@ class _WorkbenchHandler(BaseHTTPRequestHandler):
         )
 
     def parse_request(self) -> bool:
+        self._body_consumed = False
         if not super().parse_request():
             return False
         try:
@@ -753,6 +755,7 @@ class _WorkbenchHandler(BaseHTTPRequestHandler):
             self._json(
                 {"error": {"code": exc.code, "message": message}}, _ERROR_STATUS.get(exc.code, 422)
             )
+        self._drain_body()
 
     def _body(self) -> dict:
         raw_length = self._header("Content-Length")
@@ -767,6 +770,7 @@ class _WorkbenchHandler(BaseHTTPRequestHandler):
             if length > _MAX_BODY_SIZE:
                 raise OmmError("ERR_PAYLOAD_TOO_LARGE")
             raw = self.rfile.read(length)
+            self._body_consumed = True
             if len(raw) != length:
                 raise ValueError
             body = json.loads(raw.decode("utf-8"), parse_constant=_invalid_json_constant)
@@ -775,6 +779,31 @@ class _WorkbenchHandler(BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             raise OmmError("ERR_BAD_REQUEST")
         return body
+
+    def _drain_body(self) -> None:
+        """Read a small unread request body before the connection closes.
+
+        Winsock aborts a socket whose receive buffer still holds unread bytes,
+        replacing an in-flight response with an RST instead of a clean FIN.
+        """
+        if self._body_consumed or "Transfer-Encoding" in self.headers:
+            return
+        raw_length = self._header("Content-Length")
+        if (
+            raw_length is None
+            or not raw_length.isdecimal()
+            or not 0 < int(raw_length) <= _MAX_BODY_SIZE
+        ):
+            return
+        timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(0.5)
+            self.rfile.read(int(raw_length))
+        except (OSError, TimeoutError):
+            pass
+        finally:
+            with suppress(OSError):
+                self.connection.settimeout(timeout)
 
     def _handle(self) -> None:
         try:
@@ -997,9 +1026,11 @@ class _WorkbenchHandler(BaseHTTPRequestHandler):
             raise OmmError("ERR_NOT_FOUND")
         try:
             file = resolve_path(root / relative)
-            if not file.is_relative_to(root) or not file.is_file():
+            # Containment compares the un-prefixed canonical path; only the
+            # file access needs a \\\\?\\ prefix to pass the MAX_PATH limit.
+            if not file.is_relative_to(root) or not _fs_path(file).is_file():
                 raise OmmError("ERR_NOT_FOUND")
-            data = file.read_bytes()
+            data = _fs_path(file).read_bytes()
         except (FileNotFoundError, RuntimeError):
             raise OmmError("ERR_NOT_FOUND") from None
         if path in {"/", "/index.html"}:
@@ -1158,6 +1189,18 @@ class _WorkbenchHandler(BaseHTTPRequestHandler):
 
 def _invalid_json_constant(value: str) -> None:
     raise ValueError(value)
+
+
+def _fs_path(path: Path) -> Path:
+    """Extend long Windows paths past MAX_PATH when no long-path policy is enabled."""
+    if os.name != "nt":
+        return path
+    text = str(path)
+    if text.startswith("\\\\?\\") or len(text) < 240:
+        return path
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC" + text[1:])
+    return Path("\\\\?\\" + text)
 
 
 def _safe_path(path: str) -> str:

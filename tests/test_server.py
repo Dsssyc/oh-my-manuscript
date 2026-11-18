@@ -19,7 +19,7 @@ from omm.errors import OmmError
 from omm.git_revs import PUBLISHED_REF, load_workspace_at_revision, resolve_revision, sync_workspace
 from omm.i18n import MESSAGES
 from omm.numbering import number_workspace
-from omm.server import WorkbenchServer
+from omm.server import WorkbenchServer, _fs_path
 from omm.workspace import MANIFEST, atomic_write_text, init_workspace, relocate_workspace
 
 INTRO = "sections/01-introduction.md"
@@ -208,10 +208,16 @@ def test_bootstrap_static_assets_and_path_containment(server, web_dist):
         assert (status, headers["Content-Type"], data) == (200, mime, b"test")
     long_asset = "/".join(("assets", "nested-" + "a" * 120, "nested-" + "b" * 120, "font.woff2"))
     font = web_dist / long_asset
-    font.parent.mkdir(parents=True)
-    font.write_bytes(b"long-path font")
-    status, headers, data = request(server, "GET", f"/{long_asset}")
-    assert (status, headers["Content-Type"], data) == (200, "font/woff2", b"long-path font")
+    _fs_path(font.parent).mkdir(parents=True)
+    _fs_path(font).write_bytes(b"long-path font")
+    try:
+        status, headers, data = request(server, "GET", f"/{long_asset}")
+        assert (status, headers["Content-Type"], data) == (200, "font/woff2", b"long-path font")
+    finally:
+        # External cleanup tools cannot remove >260-char paths without \\?\ prefixes.
+        _fs_path(font).unlink(missing_ok=True)
+        _fs_path(font.parent).rmdir()
+        _fs_path(font.parent.parent).rmdir()
     for path in ("/assets/%2e%2e/index.html", "/assets/../index.html", "/assets/%5C.."):
         assert_error(request(server, "GET", path), 404, "ERR_NOT_FOUND")
     secret = web_dist.parent / "outside.js"

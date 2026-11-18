@@ -117,8 +117,12 @@ def test_install_and_launch_stable_runtime(isolated: Path, monkeypatch: pytest.M
         f'#!/bin/sh\nexec "{ready["python"].replace(chr(92), chr(92) * 2)}" -m omm.cli "$@"\n'
     ).encode()
     assert (skill / "scripts" / "omm.cmd").read_bytes() == (
-        f'@echo off\r\n"{ready["python"]}" -X utf8 -m omm.cli %*\r\nexit /b %ERRORLEVEL%\r\n'
-    ).encode()
+        b'@echo off\r\n"%~dp0.runtime\\venv\\Scripts\\python.exe" -X utf8 -m omm.cli %*\r\n'
+        b"exit /b %ERRORLEVEL%\r\n"
+    )
+    runtime_link = skill / "scripts" / ".runtime"
+    assert runtime_link.is_junction() if os.name == "nt" else runtime_link.is_symlink()
+    assert resolve_path(runtime_link) == runtime
     if os.name != "nt":
         assert stat.S_IMODE((skill / "scripts" / "omm").stat().st_mode) == 0o755
     for link in (host / ".claude" / "skills", host / ".gemini" / "config" / "skills"):
@@ -199,8 +203,13 @@ def test_installed_daemon_lifecycle_and_cli_events(
     monkeypatch.delenv("OMM_DEV_SOURCE")
     installed = _cli("install", "--json")
     launcher = _launcher(Path(installed["skill_root"]))
-    old_launcher = isolated / launcher.name
-    shutil.copy2(launcher, old_launcher)
+    if os.name == "nt":
+        # omm.cmd is pure ASCII and resolves the live runtime through the
+        # co-located .runtime link, so a pre-update copy is identical to it.
+        old_launcher = launcher
+    else:
+        old_launcher = isolated / launcher.name
+        shutil.copy2(launcher, old_launcher)
     workspace = isolated / "paper"
     with monkeypatch.context() as offline:
         # Keep the workspace outside the daemon registry to exclude polling as the event source.

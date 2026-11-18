@@ -89,6 +89,7 @@ class _Repository:
                 input=data,
                 check=False,
                 capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except OSError as exc:
             raise OmmError("ERR_GIT_COMMAND", path=self.root, detail=str(exc)) from exc

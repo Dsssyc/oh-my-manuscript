@@ -45,6 +45,7 @@ _RECORD_KEYS = {
 }
 _IDENTITY_KEYS = ("pid", "port", "runtime_id", "contract_version")
 _HTTP_TIMEOUT = 0.25
+_CONNECT_TIMEOUT = 0.15
 
 
 @contextmanager
@@ -102,16 +103,27 @@ def _record(state: Path) -> dict | None:
 
 def _probe(port: int, timeout: float = _HTTP_TIMEOUT) -> dict | None:
     """Return None for connection refusal and an empty dict for an unverified listener."""
-    connection = HTTPConnection(LOOPBACK, port, timeout=timeout)
+    connection = HTTPConnection(LOOPBACK, port, timeout=_CONNECT_TIMEOUT)
     try:
         try:
             connection.connect()
-        except ConnectionRefusedError:
+        except OSError as exc:
+            # Windows retransmits SYN for ~2 s before refusing an unlistened
+            # loopback port, while any real listener completes the handshake in
+            # microseconds. Both a refusal and a connect timeout therefore mean
+            # that nothing is listening on the port.
+            if not (
+                isinstance(exc, (ConnectionRefusedError, TimeoutError))
+                or exc.errno == errno.ECONNREFUSED
+                or getattr(exc, "winerror", None) in {10060, 10061}
+            ):
+                raise
             return None
+        connection.sock.settimeout(timeout)
         connection.request("GET", "/api/health", headers={"Host": f"{LOOPBACK}:{port}"})
         with connection.getresponse() as response:
             if response.status == 200:
-                data = json.loads(response.read(16385))
+                data = json.loads(response.read(16381))
                 if (
                     isinstance(data, dict)
                     and data.get("status") == "ok"
@@ -223,6 +235,10 @@ def _health_after_refusal(state: Path, port: int) -> dict | None:
                 record = _record(state)
                 pid = record["pid"] if record is not None else "unknown"
                 if acquired is not False and (record is None or _process_exited(record["pid"])):
+                    # A socket that is bound without listening refuses
+                    # connections exactly like an idle port; only a bind test
+                    # can tell a foreign holder of the port apart from nobody.
+                    _check_available_port(port)
                     return None
             if monotonic() >= deadline:
                 break
@@ -257,12 +273,12 @@ def daemon_health() -> dict:
     )
 
 
-def _spawn(python: Path, state: Path, port: int, token: str, runtime_id: str) -> None:
+def _spawn(python: Path, state: Path, port: int, token: str, runtime_id: str) -> subprocess.Popen:
     options = (
         {
-            "creationflags": subprocess.DETACHED_PROCESS
-            | subprocess.CREATE_NO_WINDOW
-            | subprocess.CREATE_NEW_PROCESS_GROUP
+            # CreateProcessW ignores CREATE_NO_WINDOW when DETACHED_PROCESS is
+            # also set, so the two flags must never be combined.
+            "creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         }
         if os.name == "nt"
         else {"start_new_session": True}
@@ -285,6 +301,7 @@ def _spawn(python: Path, state: Path, port: int, token: str, runtime_id: str) ->
     )
     # Also reap children when the CLI is embedded in a long-lived Python process.
     Thread(target=process.wait, daemon=True).start()
+    return process
 
 
 def ensure_daemon(timeout: float = 5.0) -> dict:
@@ -298,6 +315,7 @@ def ensure_daemon(timeout: float = 5.0) -> dict:
 
     token = secrets.token_urlsafe(32)
     launched = False
+    process: subprocess.Popen | None = None
     while True:
         # The same lock protects stale metadata cleanup and publication by the daemon.
         if not launched:
@@ -314,12 +332,17 @@ def ensure_daemon(timeout: float = 5.0) -> dict:
                         _check_available_port(port)
                         _clear_stale_record(state, port)
                 if acquired:
-                    _spawn(python, state, port, token, runtime_id)
+                    process = _spawn(python, state, port, token, runtime_id)
                     launched = True
             except _LOCK_ERRORS as exc:
                 raise OmmError("ERR_DAEMON_START_FAILED", port=port, detail=str(exc)) from exc
 
-        health = _probe(port)
+        # The child publishes daemon.json only once its socket is listening, and
+        # probing a refused port earlier just burns a Windows connect timeout.
+        if process is None or process.poll() is not None or (state / "daemon.json").exists():
+            health = _probe(port)
+        else:
+            health = None
         if health:
             record = _running(state, port, runtime_id, health)
             return _public_status(record, started=record["token"] == token)
@@ -414,12 +437,22 @@ def stop_daemon(timeout: float = 5.0) -> dict:
             _post(record, "/api/shutdown")
         while monotonic() < deadline:
             with _try_lock(state) as acquired:
-                if acquired and _process_exited(pid) and _probe(port) is None:
-                    remaining = _record(state)
-                    if remaining is None or remaining == record:
-                        path.unlink(missing_ok=True)
-                        return {"stopped": True}
-                    break
+                if acquired and _process_exited(pid):
+                    # Binding the port is a microsecond-level confirmation that
+                    # the listener is gone; a refused probe on Windows would
+                    # instead wait out a connect timeout on every iteration.
+                    try:
+                        _check_available_port(port)
+                    except OmmError as exc:
+                        if exc.code != "ERR_PORT_IN_USE":
+                            raise
+                    else:
+                        if _probe(port) is None:
+                            remaining = _record(state)
+                            if remaining is None or remaining == record:
+                                path.unlink(missing_ok=True)
+                                return {"stopped": True}
+                            break
             sleep(0.05)
     except (*_LOCK_ERRORS, TypeError, ValueError, RecursionError) as exc:
         raise OmmError("ERR_DAEMON_STOP_UNCONFIRMED", pid=pid) from exc
