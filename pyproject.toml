@@ -11,7 +11,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
+    "latex2mathml==3.81.1",
     "lxml>=5.3.0",
+    "markdown-it-py>=4.0.0",
+    "platformdirs>=4.3.0",
+    "portalocker>=4.0.0",
 ]
 
 [project.scripts]
