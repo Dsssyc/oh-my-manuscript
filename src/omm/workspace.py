@@ -6,7 +6,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 import tomllib
 from collections.abc import Callable
@@ -17,7 +16,6 @@ from typing import Literal, cast
 from uuid import RFC_4122, UUID, uuid4
 
 import portalocker
-from platformdirs import user_data_path
 
 from omm.errors import OmmError
 
@@ -103,7 +101,7 @@ def _replace_file(temporary: Path, path: Path) -> None:
     os.replace(temporary, path)
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     temporary = None
     try:
         with NamedTemporaryFile(
@@ -112,7 +110,9 @@ def atomic_write_text(path: Path, text: str) -> None:
             temporary = Path(stream.name)
             stream.write(text)
             stream.flush()
-        if path.exists():
+        if mode is not None:
+            temporary.chmod(mode)
+        elif path.exists():
             temporary.chmod(path.stat().st_mode & 0o777)
         _replace_file(temporary, path)
         temporary = None
@@ -285,13 +285,9 @@ def load_workspace(root: Path) -> Workspace:
 
 
 def _state_directory(state_dir: Path | None) -> Path:
-    if state_dir is not None:
-        return state_dir
-    if override := os.environ.get("OMM_STATE_DIR"):
-        return Path(override)
-    if sys.platform == "darwin":
-        return Path.home() / ".local" / "share" / "oh-my-manuscript" / "state"
-    return user_data_path("oh-my-manuscript", appauthor=False) / "state"
+    from omm.runtime import state_directory
+
+    return state_directory(state_dir)
 
 
 def _update_registry(directory: Path, operation: Callable[[dict[str, str]], bool]) -> None:

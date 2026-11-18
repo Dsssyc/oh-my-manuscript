@@ -29,7 +29,6 @@ MESSAGES: dict[Locale, dict[str, str]] = {
         "cmd.paths.help": "Report global Skill, launcher, runtime, and state directories.",
         "cmd.restart.help": "Restart the background workbench daemon.",
         "cmd.stop.help": "Stop the background workbench daemon.",
-        "err.not_implemented": "ERR_NOT_IMPLEMENTED: '{command}' is scheduled for 0.1 implementation.",
     },
     "zh-CN": {
         "cli.description": "oh-my-manuscript (omm)：以作者为第一责任人的人机协同科学论文工作台。",
@@ -50,7 +49,6 @@ MESSAGES: dict[Locale, dict[str, str]] = {
         "cmd.paths.help": "输出全局共享 Skill、启动器、运行时与状态目录路径。",
         "cmd.restart.help": "重启后台单实例工作台守护服务。",
         "cmd.stop.help": "停止后台单实例工作台守护服务。",
-        "err.not_implemented": "ERR_NOT_IMPLEMENTED：子命令 '{command}' 待在 0.1 阶段实现。",
     },
 }
 
@@ -72,6 +70,43 @@ def t(message_key: str, locale: Locale = "en", **kwargs: object) -> str:
 
 
 _DIAGNOSTICS = {
+    "ERR_CONSOLE_SETTINGS_INVALID": (
+        "The console settings file has an invalid structure.",
+        "工作台设置文件结构无效。",
+    ),
+    "ERR_DAEMON_RUNTIME_MISMATCH": (
+        "The workbench on port {port} uses runtime {running}. Restart to use {active}.",
+        "端口 {port} 上的工作台使用运行时 {running}。重启后可使用 {active}。",
+    ),
+    "ERR_DAEMON_START_FAILED": (
+        "The workbench did not become ready on port {port}. {detail}",
+        "工作台未能在端口 {port} 上就绪。{detail}",
+    ),
+    "ERR_DAEMON_STOP_UNCONFIRMED": (
+        "Could not confirm that the daemon (PID {pid}) stopped and released its lock.",
+        "无法确认守护服务（PID {pid}）已退出并释放进程锁。",
+    ),
+    "ERR_NOT_IMPLEMENTED": (
+        "'{command}' is scheduled for 0.1 implementation.",
+        "子命令 '{command}' 待在 0.1 阶段实现。",
+    ),
+    "ERR_PORT_INVALID": ("Invalid workbench port {value}.", "工作台端口 {value} 无效。"),
+    "ERR_RUNTIME_INVALID": (
+        "The stable runtime could not be validated or installed. {detail}",
+        "无法验证或安装稳定运行时。{detail}",
+    ),
+    "ERR_RUNTIME_NOT_INSTALLED": (
+        "No active runtime is installed. Run omm install.",
+        "未安装激活的运行时。请运行 omm install。",
+    ),
+    "ERR_RUNTIME_SOURCE_LEAK": (
+        "The loaded omm module is outside the active runtime.",
+        "已加载的 omm 模块位于激活运行时目录之外。",
+    ),
+    "ERR_SKILL_TARGET_CONFLICT": (
+        "An existing asset occupies this Skill link destination.",
+        "共享 Skill 的链接目标位置已被现有文件或目录占用。",
+    ),
     "ERR_ANNOTATIONS_INVALID": (
         "The Annotation file has an invalid structure.",
         "批注文件结构无效。",
@@ -288,6 +323,12 @@ _DIAGNOSTICS = {
 }
 
 _CLI_MESSAGES = {
+    "cli.installed": (
+        "Installed runtime {runtime_id} and shared Skill at {skill_root}.",
+        "已安装运行时 {runtime_id} 与共享 Skill {skill_root}。",
+    ),
+    "cli.daemon_stopped": ("Stopped the workbench daemon.", "已停止工作台守护服务。"),
+    "cli.daemon_absent": ("The workbench daemon is already stopped.", "工作台守护服务已停止。"),
     "cli.cwd_help": (
         "Workspace directory (default: current directory).",
         "手稿工作区目录（默认当前目录）。",
