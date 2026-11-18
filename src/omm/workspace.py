@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -85,6 +86,23 @@ def read_text(path: Path) -> str:
         raise OmmError("ERR_FILE_READ", path=path, detail=str(exc)) from exc
 
 
+def _replace_file(temporary: Path, path: Path) -> None:
+    if os.name != "nt":
+        os.replace(temporary, path)
+        return
+
+    # Windows scanners can briefly hold a file open without delete sharing.
+    for delay in (0.005, 0.01, 0.02, 0.04, 0.08, 0.16):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError as exc:
+            if getattr(exc, "winerror", None) not in (5, 32) or path.is_dir():
+                raise
+        time.sleep(delay)
+    os.replace(temporary, path)
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     temporary = None
     try:
@@ -96,7 +114,7 @@ def atomic_write_text(path: Path, text: str) -> None:
             stream.flush()
         if path.exists():
             temporary.chmod(path.stat().st_mode & 0o777)
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
         temporary = None
     except OSError as exc:
         raise OmmError("ERR_FILE_WRITE", path=path, detail=str(exc)) from exc

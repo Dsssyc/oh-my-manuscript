@@ -8,6 +8,7 @@ import os
 import subprocess
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
+from unittest.mock import DEFAULT, Mock
 from uuid import UUID
 
 import pytest
@@ -22,6 +23,7 @@ from omm.stamp import stamp_workspace
 from omm.workspace import (
     Author,
     Style,
+    atomic_write_text,
     init_workspace,
     load_workspace,
     register_workspace,
@@ -43,6 +45,70 @@ sources = ['章节\u005c./一 章.md', "sections/../第二章.md"]
 
 def write(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8", newline="\n")
+
+
+def test_atomic_write_text_retries_transient_windows_replace_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "annotations.json"
+    write(target, "old content\n")
+    access_denied = PermissionError("access denied")
+    access_denied.winerror = 5
+    sharing_violation = PermissionError("sharing violation")
+    sharing_violation.winerror = 32
+    replace = Mock(wraps=os.replace, side_effect=[access_denied, sharing_violation, DEFAULT])
+    delays: list[float] = []
+    monkeypatch.setattr(workspace_module, "os", SimpleNamespace(name="nt", replace=replace))
+    monkeypatch.setattr(workspace_module, "time", SimpleNamespace(sleep=delays.append))
+
+    atomic_write_text(target, "new content\n")
+
+    assert target.read_text(encoding="utf-8") == "new content\n"
+    assert list(tmp_path.iterdir()) == [target]
+    assert replace.call_count == 3
+    assert delays == [0.005, 0.01]
+
+
+@pytest.mark.parametrize(
+    ("os_name", "winerror", "target_is_dir", "expected_delays"),
+    [
+        pytest.param("nt", 5, False, [0.005, 0.01, 0.02, 0.04, 0.08, 0.16], id="exhausted"),
+        pytest.param("nt", 65, False, [], id="unhandled-winerror"),
+        pytest.param("nt", 5, True, [], id="directory"),
+        pytest.param("posix", 5, False, [], id="non-windows"),
+    ],
+)
+def test_atomic_write_text_cleans_up_after_replace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os_name: str,
+    winerror: int,
+    target_is_dir: bool,
+    expected_delays: list[float],
+) -> None:
+    target = tmp_path / "annotations.json"
+    if target_is_dir:
+        target.mkdir()
+    else:
+        write(target, "old content\n")
+    failure = PermissionError("replace failed")
+    failure.winerror = winerror
+    replace = Mock(side_effect=failure)
+    delays: list[float] = []
+    monkeypatch.setattr(workspace_module, "os", SimpleNamespace(name=os_name, replace=replace))
+    monkeypatch.setattr(workspace_module, "time", SimpleNamespace(sleep=delays.append))
+
+    with pytest.raises(OmmError, match="^ERR_FILE_WRITE$") as error:
+        atomic_write_text(target, "new content\n")
+
+    assert error.value.__cause__ is failure
+    assert error.value.diagnostic.path == target
+    assert error.value.diagnostic.params["detail"] == str(failure)
+    assert list(tmp_path.iterdir()) == [target]
+    if not target_is_dir:
+        assert target.read_text(encoding="utf-8") == "old content\n"
+    assert replace.call_count == len(expected_delays) + 1
+    assert delays == expected_delays
 
 
 @pytest.mark.parametrize(
