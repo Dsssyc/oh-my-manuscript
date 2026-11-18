@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Web frontend
+web/node_modules/
+web/dist/
+src/omm/_web_dist/
+
+# Local runtime & non-tracked evidence
+.DS_Store
+.local/
+*.log
