@@ -21,6 +21,7 @@ from omm.workspace import (
     load_workspace,
     normalize_newlines,
     read_text,
+    resolve_path,
     workspace_path,
 )
 
@@ -62,7 +63,7 @@ class RevisionSnapshot:
 
 class _Repository:
     def __init__(self, root: Path) -> None:
-        self.root = root.resolve()
+        self.root = resolve_path(root)
         # A historical workspace directory can have been deleted from the working tree.
         self.top = next(
             (path for path in (self.root, *self.root.parents) if path.is_dir()), self.root
@@ -70,8 +71,11 @@ class _Repository:
         self.env = {key: value for key, value in os.environ.items() if key.upper() not in _GIT_ENV}
         top = self.git("rev-parse", "--show-toplevel", error="ERR_GIT_WORKSPACE")
         directory = os.fsdecode(top).removesuffix("\n")
-        self.top = Path(directory.removesuffix("\r") if os.name == "nt" else directory).resolve()
-        self.prefix = PurePosixPath(self.root.relative_to(self.top))
+        self.top = resolve_path(Path(directory.removesuffix("\r") if os.name == "nt" else directory))
+        try:
+            self.prefix = PurePosixPath(self.root.relative_to(self.top))
+        except ValueError as exc:
+            raise OmmError("ERR_GIT_WORKSPACE", path=self.root) from exc
 
     def run(
         self, *args: str, data: bytes | None = None, index: Path | None = None

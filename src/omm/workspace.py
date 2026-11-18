@@ -124,10 +124,28 @@ def normalize_relative_path(value: str, *, path: Path | None = None) -> str:
     return PurePosixPath(*parts).as_posix()
 
 
+def _strip_windows_verbatim_prefix(raw: str) -> str:
+    if raw.startswith("\\\\?\\"):
+        if raw[4:8].upper() == "UNC\\":
+            return "\\\\" + raw[8:]
+        if len(raw) >= 6 and raw[4].isascii() and raw[4].isalpha() and raw[5] == ":":
+            return raw[4:]
+    return raw
+
+
+def resolve_path(path: Path) -> Path:
+    """Resolve a path with a consistent Windows drive representation."""
+    resolved = path.resolve()
+    if os.name == "nt":
+        return Path(_strip_windows_verbatim_prefix(str(resolved)))
+    return resolved
+
+
 def workspace_path(root: Path, relative: str, path: Path | None = None) -> Path:
-    target = root / relative
     try:
-        resolved = target.resolve()
+        root = resolve_path(root)
+        target = root / relative
+        resolved = resolve_path(target)
     except (OSError, RuntimeError) as exc:
         raise OmmError("ERR_WORKSPACE_PATH_INVALID", path=path, value=relative) from exc
     if not resolved.is_relative_to(root):
@@ -148,7 +166,7 @@ def _uuid4(value: object) -> str:
 
 
 def load_workspace(root: Path) -> Workspace:
-    root = root.resolve()
+    root = resolve_path(root)
     path = root / MANIFEST
     source = read_text(path)
     try:
@@ -309,9 +327,9 @@ def _set_registry_path(
     replace: bool = False,
 ) -> bool:
     workspace_id = workspace.workspace_id
-    root = workspace.root
+    root = resolve_path(workspace.root)
     old = records.get(workspace_id)
-    if old is not None and Path(old) == root:
+    if old is not None and resolve_path(Path(old)) == root:
         return False
     if relocating and old is None:
         raise OmmError("ERR_WORKSPACE_NOT_REGISTERED", path=root, workspace_id=workspace_id)
@@ -319,7 +337,7 @@ def _set_registry_path(
         raise OmmError(
             "ERR_WORKSPACE_ALREADY_REGISTERED", path=root, old_path=old, workspace_id=workspace_id
         )
-    if any(Path(value) == root for value in records.values()):
+    if any(resolve_path(Path(value)) == root for value in records.values()):
         raise OmmError("ERR_WORKSPACE_PATH_REGISTERED", path=root)
     records[workspace_id] = str(root)
     return True
@@ -347,7 +365,7 @@ def relocate_workspace(
 def init_workspace(
     root: Path, title: str = DEFAULT_TITLE, *, state_dir: Path | None = None
 ) -> Workspace:
-    root = root.resolve()
+    root = resolve_path(root)
     manifest = root / MANIFEST
     if not isinstance(title, str) or not title.strip():
         raise OmmError("ERR_MANIFEST_INVALID", path=manifest, field="title")

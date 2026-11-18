@@ -18,7 +18,7 @@ import portalocker
 from omm import ast
 from omm.errors import OmmError
 from omm.parser import BLOCK_ID
-from omm.workspace import ANNOTATIONS, atomic_write_text, workspace_path
+from omm.workspace import ANNOTATIONS, atomic_write_text, resolve_path, workspace_path
 
 _LOCK = Path(".omm", "cache", "annotations.lock")
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -307,7 +307,7 @@ def _read_annotations(path: Path) -> dict[str, Annotation]:
 
 @contextmanager
 def _locked_path(root: Path) -> Iterator[Path]:
-    root = root.resolve()
+    root = resolve_path(root)
     path = workspace_path(root, ANNOTATIONS.as_posix())
     lock = workspace_path(root, _LOCK.as_posix())
     try:
