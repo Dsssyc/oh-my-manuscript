@@ -64,9 +64,9 @@ def detect_locale(explicit: str | None = None) -> Locale:
     return "en"
 
 
-def t(key: str, locale: Locale = "en", **kwargs: object) -> str:
+def t(message_key: str, locale: Locale = "en", **kwargs: object) -> str:
     kwargs.setdefault("detail", "")
-    template = MESSAGES[locale][key]
+    template = MESSAGES[locale][message_key]
     message = template.format(**kwargs)
     return message.rstrip() if template.endswith("{detail}") else message
 
@@ -110,6 +110,7 @@ _DIAGNOSTICS = {
         "The target block was not found in revision {revision}.",
         "在版本 {revision} 中找不到目标块。",
     ),
+    "ERR_BAD_REQUEST": ("The request is invalid.", "请求无效。"),
     "ERR_BIB_DUPLICATE_KEY": ("Duplicate BibTeX key {key}.", "BibTeX 键 {key} 重复。"),
     "ERR_BIB_INVALID": ("Invalid BibTeX entry or field.", "BibTeX 条目或字段无效。"),
     "ERR_BLOCK_ATTRIBUTES_INVALID": ("Invalid block attributes.", "块属性无效。"),
@@ -134,6 +135,23 @@ _DIAGNOSTICS = {
     ),
     "ERR_FILE_READ": ("Could not read the file. {detail}", "无法读取文件。{detail}"),
     "ERR_FILE_WRITE": ("Could not write the file. {detail}", "无法写入文件。{detail}"),
+    "ERR_FORBIDDEN_CSRF": (
+        "The workbench CSRF token is missing or invalid.",
+        "工作台 CSRF 令牌缺失或无效。",
+    ),
+    "ERR_FORBIDDEN_FETCH_SITE": (
+        "The workbench rejected the request's fetch site.",
+        "工作台拒绝来自此站点的请求。",
+    ),
+    "ERR_FORBIDDEN_HOST": (
+        "The Host header must match the workbench loopback address.",
+        "Host 请求头必须与工作台回环地址完全一致。",
+    ),
+    "ERR_FORBIDDEN_ORIGIN": (
+        "The Origin header must match the workbench origin.",
+        "Origin 请求头必须与工作台的源完全一致。",
+    ),
+    "ERR_FORBIDDEN_TOKEN": ("The daemon token is missing or invalid.", "守护服务令牌缺失或无效。"),
     "ERR_GIT_COMMAND": ("The Git command failed. {detail}", "Git 命令执行失败。{detail}"),
     "ERR_GIT_INIT": ("Could not initialize the Git repository.", "无法初始化 Git 仓库。"),
     "ERR_GIT_WORKSPACE": (
@@ -187,11 +205,22 @@ _DIAGNOSTICS = {
         "The formula uses an unsupported LaTeX environment.",
         "公式使用了不受支持的 LaTeX 环境。",
     ),
+    "ERR_METHOD_NOT_ALLOWED": ("This HTTP method is unavailable.", "此处不支持该 HTTP 方法。"),
     "ERR_NO_PUBLISHED_REVISION": (
         "No revision has been published. Run omm sync first.",
         "尚无已发布版本。请先运行 omm sync。",
     ),
+    "ERR_NOT_FOUND": ("The requested resource was not found.", "找不到请求的资源。"),
+    "ERR_OUTLINE_CONFLICT": (
+        (
+            "The Outline Block could not be saved because the workspace has changed. "
+            "Sync or reload the workspace before saving."
+        ),
+        "手稿工作区已变化，无法保存大纲块。请同步或重新加载后再保存。",
+    ),
     "ERR_OUTLINE_UNEXPANDED": ("Outline Block is awaiting expansion.", "大纲块尚未扩写。"),
+    "ERR_PAYLOAD_TOO_LARGE": ("The request body is too large.", "请求体过大。"),
+    "ERR_PORT_IN_USE": ("Workbench port {port} is already in use.", "工作台端口 {port} 已被占用。"),
     "ERR_REFERENCE_INVALID": ("Invalid block reference {value}.", "块引用 {value} 无效。"),
     "ERR_REFERENCE_MISSING": (
         "Referenced block {target} was not found.",
@@ -218,6 +247,7 @@ _DIAGNOSTICS = {
         "Revision {revision} is outside the published history.",
         "版本 {revision} 不在已发布的版本历史中。",
     ),
+    "ERR_SERVER": ("The workbench could not complete the request.", "工作台无法完成此请求。"),
     "ERR_SOURCE_INVALID": (
         "Structured Source contains a NUL character.",
         "结构化源稿含有 NUL 字符。",
