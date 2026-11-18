@@ -4,18 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
+import os
+import subprocess
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import DEFAULT, Mock
 from uuid import UUID
 
 import pytest
 
-from omm import ast
+from omm import ast, git_revs
+from omm import workspace as workspace_module
 from omm.bib import parse_bib
 from omm.checker import check_workspace
 from omm.errors import OmmError
 from omm.parser import parse_source
 from omm.stamp import stamp_workspace
-from omm.workspace import Author, Style, init_workspace, load_workspace, register_workspace
+from omm.workspace import (
+    Author,
+    Style,
+    atomic_write_text,
+    init_workspace,
+    load_workspace,
+    register_workspace,
+    workspace_path,
+)
 
 WORKSPACE_ID = "e7b96785-b014-41d2-96d2-c486e29081ce"
 MANIFEST = f'''
@@ -32,6 +45,201 @@ sources = ['章节\u005c./一 章.md', "sections/../第二章.md"]
 
 def write(path: Path, source: str) -> None:
     path.write_text(source, encoding="utf-8", newline="\n")
+
+
+def test_atomic_write_text_retries_transient_windows_replace_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "annotations.json"
+    write(target, "old content\n")
+    access_denied = PermissionError("access denied")
+    access_denied.winerror = 5
+    sharing_violation = PermissionError("sharing violation")
+    sharing_violation.winerror = 32
+    replace = Mock(wraps=os.replace, side_effect=[access_denied, sharing_violation, DEFAULT])
+    delays: list[float] = []
+    monkeypatch.setattr(workspace_module, "os", SimpleNamespace(name="nt", replace=replace))
+    monkeypatch.setattr(workspace_module, "time", SimpleNamespace(sleep=delays.append))
+
+    atomic_write_text(target, "new content\n")
+
+    assert target.read_text(encoding="utf-8") == "new content\n"
+    assert list(tmp_path.iterdir()) == [target]
+    assert replace.call_count == 3
+    assert delays == [0.005, 0.01]
+
+
+@pytest.mark.parametrize(
+    ("os_name", "winerror", "target_is_dir", "expected_delays"),
+    [
+        pytest.param("nt", 5, False, [0.005, 0.01, 0.02, 0.04, 0.08, 0.16], id="exhausted"),
+        pytest.param("nt", 65, False, [], id="unhandled-winerror"),
+        pytest.param("nt", 5, True, [], id="directory"),
+        pytest.param("posix", 5, False, [], id="non-windows"),
+    ],
+)
+def test_atomic_write_text_cleans_up_after_replace_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    os_name: str,
+    winerror: int,
+    target_is_dir: bool,
+    expected_delays: list[float],
+) -> None:
+    target = tmp_path / "annotations.json"
+    if target_is_dir:
+        target.mkdir()
+    else:
+        write(target, "old content\n")
+    failure = PermissionError("replace failed")
+    failure.winerror = winerror
+    replace = Mock(side_effect=failure)
+    delays: list[float] = []
+    monkeypatch.setattr(workspace_module, "os", SimpleNamespace(name=os_name, replace=replace))
+    monkeypatch.setattr(workspace_module, "time", SimpleNamespace(sleep=delays.append))
+
+    with pytest.raises(OmmError, match="^ERR_FILE_WRITE$") as error:
+        atomic_write_text(target, "new content\n")
+
+    assert error.value.__cause__ is failure
+    assert error.value.diagnostic.path == target
+    assert error.value.diagnostic.params["detail"] == str(failure)
+    assert list(tmp_path.iterdir()) == [target]
+    if not target_is_dir:
+        assert target.read_text(encoding="utf-8") == "old content\n"
+    assert replace.call_count == len(expected_delays) + 1
+    assert delays == expected_delays
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (r"\\?\D:\repo\sub", r"D:\repo\sub"),
+        (r"\\?\UNC\srv\share\dir", r"\\srv\share\dir"),
+        (r"\\?\unc\srv\share\dir", r"\\srv\share\dir"),
+        (r"D:\repo\sub", r"D:\repo\sub"),
+        (r"\\srv\share\dir", r"\\srv\share\dir"),
+        (r"\\?\Volume{1234}\dir", r"\\?\Volume{1234}\dir"),
+    ],
+)
+def test_strip_windows_verbatim_prefix(raw: str, expected: str) -> None:
+    assert workspace_module._strip_windows_verbatim_prefix(raw) == expected
+
+
+@pytest.fixture
+def simulated_windows_paths(monkeypatch: pytest.MonkeyPatch) -> type[PureWindowsPath]:
+    class SimulatedWindowsPath(PureWindowsPath):
+        def resolve(self) -> SimulatedWindowsPath:
+            if self == PureWindowsPath(r"D:\repo\escape"):
+                return type(self)(r"\\?\D:\outside\file")
+            if self == PureWindowsPath(r"\\srv\share\repo\escape"):
+                return type(self)(r"\\?\UNC\srv\share\outside\file")
+            if self in (
+                PureWindowsPath(r"D:\repo"),
+                PureWindowsPath(r"\\srv\share\repo"),
+            ) or str(self).startswith("\\\\?\\"):
+                return self
+            if str(self).startswith("\\\\"):
+                return type(self)("\\\\?\\UNC\\" + str(self)[2:])
+            return type(self)("\\\\?\\" + str(self))
+
+        def is_dir(self) -> bool:
+            return True
+
+    monkeypatch.setattr(workspace_module, "Path", SimulatedWindowsPath)
+    monkeypatch.setattr(workspace_module, "os", SimpleNamespace(name="nt"))
+    return SimulatedWindowsPath
+
+
+@pytest.mark.parametrize(
+    ("raw_root", "raw_target"),
+    [
+        (r"D:\repo", r"D:\repo\.omm\cache\annotations.lock"),
+        (r"\\srv\share\repo", r"\\srv\share\repo\.omm\cache\annotations.lock"),
+    ],
+)
+def test_workspace_path_normalizes_windows_prefixes_and_rejects_escape(
+    simulated_windows_paths: type[PureWindowsPath], raw_root: str, raw_target: str
+) -> None:
+    root = simulated_windows_paths(raw_root)
+    target = simulated_windows_paths(raw_target)
+    assert workspace_path(root, r".omm\cache\annotations.lock") == target
+    with pytest.raises(OmmError, match="ERR_WORKSPACE_PATH_INVALID"):
+        workspace_path(root, "escape")
+
+
+def test_workspace_path_resolves_root_and_rejects_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    alias = tmp_path / "workspace-alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+        (root / "escape").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    assert workspace_path(alias, "inside.md") == root.resolve() / "inside.md"
+    with pytest.raises(OmmError, match="ERR_WORKSPACE_PATH_INVALID"):
+        workspace_path(alias, "escape/file.md")
+
+
+def test_init_preserves_internal_dangling_symlink(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    sections = root / "sections"
+    sections.mkdir(parents=True)
+    link = sections / "01-introduction.md"
+    target = root / "future-introduction.md"
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"file symlinks unavailable: {exc}")
+
+    assert workspace_path(root, "sections/01-introduction.md").is_symlink()
+    init_workspace(root, state_dir=tmp_path / "state")
+    assert link.is_symlink()
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junctions are Windows specific")
+def test_workspace_path_rejects_junction_escape(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(root / "escape"), str(outside)],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        pytest.skip("directory junctions unavailable on this filesystem")
+    with pytest.raises(OmmError, match="ERR_WORKSPACE_PATH_INVALID"):
+        workspace_path(root, "escape/file.md")
+
+
+def test_registry_compares_normalized_windows_paths(
+    simulated_windows_paths: type[PureWindowsPath],
+) -> None:
+    root = simulated_windows_paths(r"D:\repo\manuscript")
+    workspace = workspace_module.Workspace(root, WORKSPACE_ID, "title", "", "refs.bib", Style(), {})
+    records = {WORKSPACE_ID: r"\\?\D:\repo\manuscript"}
+    assert not workspace_module._set_registry_path(workspace, records)
+    with pytest.raises(OmmError, match="ERR_WORKSPACE_PATH_REGISTERED"):
+        workspace_module._set_registry_path(workspace, {"other": records[WORKSPACE_ID]})
+
+
+def test_repository_normalizes_windows_paths_and_reports_unrelated_root(
+    simulated_windows_paths: type[PureWindowsPath], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(git_revs, "Path", simulated_windows_paths)
+    monkeypatch.setattr(git_revs._Repository, "git", lambda *_args, **_kwargs: b"D:\\repo\n")
+    repo = git_revs._Repository(simulated_windows_paths(r"D:\repo\manuscript"))
+    assert repo.prefix == PurePosixPath("manuscript")
+    with pytest.raises(OmmError, match="ERR_GIT_WORKSPACE") as error:
+        git_revs._Repository(simulated_windows_paths(r"E:\outside"))
+    assert error.value.diagnostic.path == simulated_windows_paths(r"E:\outside")
 
 
 def test_manifest_loads_strict_typed_fields_and_posix_paths(tmp_path: Path) -> None:
@@ -378,22 +586,40 @@ and [#loc:p-first..p-second]. {#p-reply}
 :::
 """,
     )
+    open_annotation = {
+        "id": "550e8400-e29b-41d4-a716-446655440000",
+        "block_id": "p-first",
+        "base_rev": "a" * 40,
+        "selector": {"kind": "block"},
+        "comment": "Clarify the first result.",
+        "created_at": "2026-11-18T00:00:00Z",
+        "before_block_md": "First.",
+        "resolutions": [],
+    }
+    resolution = {
+        "resolved_at": "2026-11-18T00:01:00Z",
+        "after_rev": "b" * 40,
+        "after_block_md": "Revised.",
+        "reopened_at": None,
+    }
     write(
         root / ".omm" / "annotations.json",
         json.dumps(
             {
                 "schema_version": 1,
                 "items": [
-                    {"id": "open", "block_id": "p-first", "resolutions": []},
+                    open_annotation,
                     {
-                        "id": "resolved",
-                        "block_id": "p-first",
-                        "resolutions": [{"reopened_at": None}],
+                        **open_annotation,
+                        "id": "550e8400-e29b-41d4-a716-446655440001",
+                        "resolutions": [resolution],
                     },
                     {
-                        "id": "reopened",
+                        **open_annotation,
+                        "id": "550e8400-e29b-41d4-a716-446655440002",
                         "block_id": "p-second",
-                        "resolutions": [{"reopened_at": "2026-11-18T00:00:00Z"}],
+                        "before_block_md": "Second.",
+                        "resolutions": [{**resolution, "reopened_at": "2026-11-18T00:02:00Z"}],
                     },
                 ],
             }
@@ -427,6 +653,14 @@ and [#loc:p-first..p-second]. {#p-reply}
         "ERR_OUTLINE_UNEXPANDED",
         "ERR_ANNOTATION_OPEN",
     }
+    assert [
+        (issue.block_id, issue.params["id"])
+        for issue in result.diagnostics
+        if issue.code == "ERR_ANNOTATION_OPEN"
+    ] == [
+        ("p-first", open_annotation["id"]),
+        ("p-second", "550e8400-e29b-41d4-a716-446655440002"),
+    ]
 
 
 def test_stamp_preflights_duplicate_ids_across_the_workspace(tmp_path: Path) -> None:

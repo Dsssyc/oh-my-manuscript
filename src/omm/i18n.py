@@ -17,11 +17,11 @@ MESSAGES: dict[Locale, dict[str, str]] = {
         "cmd.init.help": "Initialize and register a Git-backed Manuscript Workspace.",
         "cmd.register.help": "Register an existing Manuscript Workspace in the global registry.",
         "cmd.relocate.help": "Update the path of a moved or renamed Manuscript Workspace.",
-        "cmd.stamp.help": "Assign persistent {#block_id} markers to unlabelled blocks.",
+        "cmd.stamp.help": "Assign persistent {{#block_id}} markers to unlabelled blocks.",
         "cmd.sync.help": "Validate sources and publish a new Git revision to the workbench.",
         "cmd.check.help": "Validate Outline Blocks, open Annotations, and reference integrity.",
-        "cmd.checkpoint.help": "Advance the Last Checkpoint baseline to the published revision.",
-        "cmd.annotate.help": "List, resolve, or reopen workspace Annotations.",
+        "cmd.checkpoint.help": "Set the Last Checkpoint to a published revision.",
+        "cmd.annotate.help": "Manage Annotations in the Manuscript Workspace.",
         "cmd.build.help": "Compile Structured Source into .docx or .tex submission packages.",
         "cmd.console.help": "Ensure the single-instance workbench daemon is active and print its URL.",
         "cmd.health.help": "Inspect daemon, contract, and runtime integrity.",
@@ -38,11 +38,11 @@ MESSAGES: dict[Locale, dict[str, str]] = {
         "cmd.init.help": "初始化并登记基于 Git 的手稿工作区（Manuscript Workspace）。",
         "cmd.register.help": "将已有的手稿工作区登记至全局工作区注册表。",
         "cmd.relocate.help": "在手稿工作区目录移动或重命名后更新登记路径。",
-        "cmd.stamp.help": "显式为未标记裸块补齐持久 {#block_id} 标识。",
-        "cmd.sync.help": "全量校验源稿并发布新的 Git revision 至工作台。",
+        "cmd.stamp.help": "显式为未标记裸块补齐持久 {{#block_id}} 标识。",
+        "cmd.sync.help": "校验结构化源稿并向工作台发布新的 Git 版本。",
         "cmd.check.help": "静态校验未扩写的大纲块、待处理批注与引用完整性。",
-        "cmd.checkpoint.help": "将上一审阅点（Last Checkpoint）基准推进至当前已发布版本。",
-        "cmd.annotate.help": "查看、解决或重新打开手稿批注。",
+        "cmd.checkpoint.help": "将上一审阅点指向一个已发布版本。",
+        "cmd.annotate.help": "管理手稿工作区中的批注。",
         "cmd.build.help": "调用目标编译器生成 .docx 或 .tex 投稿产物。",
         "cmd.console.help": "确保本地单实例工作台守护服务就绪并输出固定回环地址。",
         "cmd.health.help": "读取守护服务、契约版本与运行时完整性诊断。",
@@ -65,8 +65,10 @@ def detect_locale(explicit: str | None = None) -> Locale:
 
 
 def t(key: str, locale: Locale = "en", **kwargs: object) -> str:
+    kwargs.setdefault("detail", "")
     template = MESSAGES[locale][key]
-    return template.format(**kwargs) if kwargs else template
+    message = template.format(**kwargs)
+    return message.rstrip() if template.endswith("{detail}") else message
 
 
 _DIAGNOSTICS = {
@@ -74,7 +76,40 @@ _DIAGNOSTICS = {
         "The Annotation file has an invalid structure.",
         "批注文件结构无效。",
     ),
+    "ERR_ANNOTATIONS_LOCK": (
+        "Could not acquire the Annotation store lock.",
+        "无法锁定批注存储。",
+    ),
+    "ERR_ANNOTATION_ATOMIC_SPLIT": (
+        "The text selection splits a formula or reference.",
+        "文本选区截断了公式或引用。",
+    ),
+    "ERR_ANNOTATION_CELL_COVERED": (
+        "Select the top-left cell of the merged table cells.",
+        "请选择合并单元格的左上主格。",
+    ),
+    "ERR_ANNOTATION_ID_CONFLICT": (
+        "Annotation ID {id} is already in use with different content.",
+        "批注标识 {id} 已用于其他内容。",
+    ),
+    "ERR_ANNOTATION_NOT_FOUND": ("Annotation {id} was not found.", "找不到批注 {id}。"),
     "ERR_ANNOTATION_OPEN": ("Annotation {id} is open.", "批注 {id} 尚未处理。"),
+    "ERR_ANNOTATION_QUOTE_MISMATCH": (
+        "The quoted text does not match the selected range in the Structured Source.",
+        "引用文本与结构化源稿中选定范围的内容不一致。",
+    ),
+    "ERR_ANNOTATION_SELECTOR_MISMATCH": (
+        "The Annotation selector is invalid or incompatible with the target block.",
+        "批注选择器无效或与目标块不匹配。",
+    ),
+    "ERR_ANNOTATION_STATE_CONFLICT": (
+        "This action is unavailable in the current state of Annotation {id}.",
+        "批注 {id} 的当前状态不允许此操作。",
+    ),
+    "ERR_ANNOTATION_TARGET_MISSING": (
+        "The target block was not found in revision {revision}.",
+        "在版本 {revision} 中找不到目标块。",
+    ),
     "ERR_BIB_DUPLICATE_KEY": ("Duplicate BibTeX key {key}.", "BibTeX 键 {key} 重复。"),
     "ERR_BIB_INVALID": ("Invalid BibTeX entry or field.", "BibTeX 条目或字段无效。"),
     "ERR_BLOCK_ATTRIBUTES_INVALID": ("Invalid block attributes.", "块属性无效。"),
@@ -99,7 +134,12 @@ _DIAGNOSTICS = {
     ),
     "ERR_FILE_READ": ("Could not read the file. {detail}", "无法读取文件。{detail}"),
     "ERR_FILE_WRITE": ("Could not write the file. {detail}", "无法写入文件。{detail}"),
+    "ERR_GIT_COMMAND": ("The Git command failed. {detail}", "Git 命令执行失败。{detail}"),
     "ERR_GIT_INIT": ("Could not initialize the Git repository.", "无法初始化 Git 仓库。"),
+    "ERR_GIT_WORKSPACE": (
+        "Could not locate the Git repository for the Manuscript Workspace. {detail}",
+        "无法找到手稿工作区所在的 Git 仓库。{detail}",
+    ),
     "ERR_LOCATION_CONTEXT": (
         "Use location references in the response letter.",
         "请在回复信中使用物理位置引用。",
@@ -120,12 +160,37 @@ _DIAGNOSTICS = {
         "Block {target} has no independent line number.",
         "块 {target} 没有独立行号。",
     ),
+    "ERR_MANAGED_PATH_CONFLICT": (
+        "The figure asset {asset} conflicts with another managed file at the same path.",
+        "插图资产 {asset} 与同一路径下的另一个受管文件冲突。",
+    ),
     "ERR_MANIFEST_INVALID": ("Invalid manifest field {field}.", "清单字段 {field} 无效。"),
+    "ERR_MATH_INVALID_LATEX": ("Invalid LaTeX formula.", "LaTeX 公式无效。"),
     "ERR_MATH_TAG_FORBIDDEN": (
         r"Remove the \tag command from the formula.",
         r"请移除公式中的 \tag 命令。",
     ),
     "ERR_MATH_UNCLOSED": ("Display math is missing its closing $$.", "行间公式缺少闭合的 $$。"),
+    "ERR_MATH_UNKNOWN_COMMAND": (
+        "The formula contains an unknown LaTeX command.",
+        "公式含有未知的 LaTeX 命令。",
+    ),
+    "ERR_MATH_UNKNOWN_ELEMENT": (
+        "The formula contains an unsupported MathML element.",
+        "公式含有不受支持的 MathML 元素。",
+    ),
+    "ERR_MATH_UNSUPPORTED_CONSTRUCT": (
+        "The formula contains an unsupported construct.",
+        "公式含有不受支持的结构。",
+    ),
+    "ERR_MATH_UNSUPPORTED_ENV": (
+        "The formula uses an unsupported LaTeX environment.",
+        "公式使用了不受支持的 LaTeX 环境。",
+    ),
+    "ERR_NO_PUBLISHED_REVISION": (
+        "No revision has been published. Run omm sync first.",
+        "尚无已发布版本。请先运行 omm sync。",
+    ),
     "ERR_OUTLINE_UNEXPANDED": ("Outline Block is awaiting expansion.", "大纲块尚未扩写。"),
     "ERR_REFERENCE_INVALID": ("Invalid block reference {value}.", "块引用 {value} 无效。"),
     "ERR_REFERENCE_MISSING": (
@@ -145,6 +210,14 @@ _DIAGNOSTICS = {
         "A Review Item must begin with a comment directive.",
         "审稿追踪项须以 comment 指令块开头。",
     ),
+    "ERR_REVISION_NOT_FOUND": (
+        "Could not resolve {revision} to a Git commit.",
+        "无法将 {revision} 解析为 Git 提交。",
+    ),
+    "ERR_REVISION_NOT_PUBLISHED": (
+        "Revision {revision} is outside the published history.",
+        "版本 {revision} 不在已发布的版本历史中。",
+    ),
     "ERR_SOURCE_INVALID": (
         "Structured Source contains a NUL character.",
         "结构化源稿含有 NUL 字符。",
@@ -153,6 +226,10 @@ _DIAGNOSTICS = {
     "ERR_STAMP_INVALID": (
         "The block ID could not be applied safely.",
         "无法安全地为此块补齐标识。",
+    ),
+    "ERR_SYNC_CONFLICT": (
+        "The published revision changed or its Git reference could not be updated. {detail}",
+        "已发布版本发生变化，或无法更新其 Git 引用。{detail}",
     ),
     "ERR_TABLE_COLUMNS_INVALID": (
         "Expected {expected} cells in this row, found {actual}.",
@@ -203,6 +280,59 @@ _CLI_MESSAGES = {
     "cli.relocated": ("Updated Workspace path to {path}", "已更新手稿工作区路径为 {path}"),
     "cli.stamped": ("Assigned {count} block IDs.", "已分配 {count} 个块标识。"),
     "cli.check_ok": ("Workspace checks passed.", "手稿工作区检查通过。"),
+    "cli.json_help": ("Print the result as JSON.", "以 JSON 输出结果。"),
+    "cli.expected_rev_help": (
+        "Expected current published revision.",
+        "预期的当前已发布版本。",
+    ),
+    "cli.checkpoint_revision_help": (
+        "Git revision or reference to mark (defaults to the current published revision).",
+        "要设为审阅点的 Git 版本或引用（默认为当前已发布版本）。",
+    ),
+    "cli.sync_changed": ("Published revision {revision}.", "已发布版本 {revision}。"),
+    "cli.sync_unchanged": (
+        "No changes to publish. Retained revision {revision}.",
+        "没有待发布的改动，当前版本仍为 {revision}。",
+    ),
+    "cli.checkpoint_set": (
+        "Set the Last Checkpoint to {checkpoint}.",
+        "已将上一审阅点设为 {checkpoint}。",
+    ),
+    "cmd.annotate.list.help": ("List Annotations.", "列出批注。"),
+    "cmd.annotate.create.help": ("Create an Annotation.", "新建批注。"),
+    "cmd.annotate.resolve.help": (
+        "Resolve an Annotation and record its Resolution Snapshot.",
+        "处理批注并记录修改前后块快照。",
+    ),
+    "cmd.annotate.reopen.help": ("Reopen a resolved Annotation.", "重新打开已处理的批注。"),
+    "cmd.annotate.delete.help": ("Delete an Annotation.", "删除批注。"),
+    "cli.annotation_status_help": ("Filter by Annotation status.", "按批注状态筛选。"),
+    "cli.annotation_block_id_help": ("Target block ID.", "目标块标识。"),
+    "cli.annotation_comment_help": ("Annotation text.", "批注内容。"),
+    "cli.annotation_base_rev_help": (
+        "Git revision or reference to annotate (defaults to the current published revision).",
+        "批注所针对的 Git 版本或引用（默认为当前已发布版本）。",
+    ),
+    "cli.annotation_selector_help": (
+        "Selector as a JSON object (defaults to the whole block).",
+        "以 JSON 对象指定选择器（默认为整块）。",
+    ),
+    "cli.annotation_after_rev_help": (
+        "Published Git revision or reference (defaults to the current published revision).",
+        "已发布的 Git 版本或引用（默认为当前已发布版本）。",
+    ),
+    "cli.annotation_id_help": ("Annotation ID (lowercase UUIDv4).", "批注标识（小写 UUIDv4）。"),
+    "cli.annotation_status.open": ("open", "未处理"),
+    "cli.annotation_status.resolved": ("resolved", "已处理"),
+    "cli.annotation_empty": ("No Annotations found.", "没有符合条件的批注。"),
+    "cli.annotation_row": (
+        "{id} [{status}] {block_id}: {comment}",
+        "{id}［{status}］{block_id}：{comment}",
+    ),
+    "cli.annotation_create_ok": ("Created Annotation {id}.", "已新建批注 {id}。"),
+    "cli.annotation_resolve_ok": ("Resolved Annotation {id}.", "已处理批注 {id}。"),
+    "cli.annotation_reopen_ok": ("Reopened Annotation {id}.", "已重新打开批注 {id}。"),
+    "cli.annotation_deleted": ("Deleted Annotation {id}.", "已删除批注 {id}。"),
     "cli.error": ("error", "错误"),
     "cli.warning": ("warning", "警告"),
     "cli.default_title": ("Untitled Manuscript", "未命名手稿"),
