@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { detectBrowserLocale, type Locale, type MessageKey, WEB_MESSAGES } from "./i18n";
 
-type TabId = "manuscript" | "appendices" | "reviews" | "figures";
+type TabId = "manuscript" | "appendices" | "reviews" | "figures" | "references";
 
 export function App() {
   const [locale, setLocale] = useState<Locale>(detectBrowserLocale);
@@ -13,6 +13,7 @@ export function App() {
     { id: "appendices", labelKey: "tab.appendices" },
     { id: "reviews", labelKey: "tab.reviews" },
     { id: "figures", labelKey: "tab.figures" },
+    { id: "references", labelKey: "tab.references" },
   ];
 
   return (

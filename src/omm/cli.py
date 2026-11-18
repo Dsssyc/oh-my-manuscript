@@ -9,6 +9,25 @@ from collections.abc import Sequence
 from omm import __version__
 from omm.i18n import Locale, detect_locale, t
 
+COMMANDS: tuple[str, ...] = (
+    "install",
+    "init",
+    "register",
+    "relocate",
+    "stamp",
+    "sync",
+    "check",
+    "checkpoint",
+    "annotate",
+    "build",
+    "console",
+    "health",
+    "runtime",
+    "paths",
+    "restart",
+    "stop",
+)
+
 
 def _preparse_locale(argv: Sequence[str]) -> Locale:
     for idx, token in enumerate(argv):
@@ -37,7 +56,7 @@ def build_parser(locale: Locale) -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
-    for cmd in ("init", "serve", "check", "build"):
+    for cmd in COMMANDS:
         subparsers.add_parser(cmd, help=t(f"cmd.{cmd}.help", locale))
 
     return parser

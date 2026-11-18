@@ -18,20 +18,24 @@
 
 ## `0.1` 核心工作流规划
 
-- `omm init` — 初始化基于 Git 的**手稿工作区**（`manuscript.toml`、分章**结构化源稿**、`references.bib` 与 `.omm/` 状态目录）。
-- `omm serve` — 启动本地毫秒级热同步工作台（支持正文 / 附录 / 审稿与回复信 / 图表总览多标签页与分屏联动、三级**审阅点**差异对比，以及文字与图表全元素**批注**）。
-- `omm check` — 静态校验未扩写的**大纲块**、待处理**批注**、断链的 `block_id` 或文献引用、术语一致性与期刊格式约束。
-- `omm build` — 调用**目标编译器**（结合可选的**投稿里程碑** Git 标签），确定性构建 `.docx` 或 `.tex` 投稿包并自动反解回填真实行号。
+`oh-my-manuscript` 一次安装到全局统一的共享 Agent Skill 目录（`~/.agents/skills/oh-my-manuscript`，自动为已安装的编码智能体建立目录链接，并由单实例守护服务固定监听 `127.0.0.1:49638`），同时让每篇论文的**手稿工作区**原地自包含在各自的课题 Git 仓库中：
 
-核心双语概念定义见 [docs/GLOSSARY.md](./docs/GLOSSARY.md)。
+- `uvx oh-my-manuscript@<version> install` — 物化独立稳定运行时与全局共享 Skill（唯一日常入口 `~/.agents/skills/oh-my-manuscript/scripts/omm`）。
+- `omm init` / `omm register` / `omm relocate` — 初始化、登记或重定位基于 Git 的**手稿工作区**（`manuscript.toml`、分章**结构化源稿**、`references.bib` 与 `.omm/` 状态目录）。
+- `omm console` — 确保本地单实例工作台守护服务就绪并返回固定回环地址（支持正文 / 附录 / 审稿追踪项 / 图表总览 / 参考文献五大版面与分屏联动、三级**审阅点**差异对比，以及文字与图表全元素**批注**）。
+- `omm stamp` / `omm sync` — 为新增裸块补齐持久 `{#block_id}`，并在全量语法校验通过后发布新的 Git `revision` 触发工作台整版平滑切换（消除 AI 连续编辑期的半途抖动）。
+- `omm check` — 静态校验未扩写的**大纲块**、待处理**批注**、断链的 `block_id` 或文献引用，以及期刊格式约束。
+- `omm build` — 调用**目标编译器**（结合可选的**投稿里程碑** Git 标签），确定性构建 `.docx` 或 `.tex` 投稿包并自动反解回填真实页码与行号。
+
+核心双语概念定义见 [docs/GLOSSARY.md](./docs/GLOSSARY.md)，核心架构契约见 [ADR-001](./docs/adr/ADR-001-core-representation-and-contracts.md) 与 [ADR-002](./docs/adr/ADR-002-global-skill-runtime-and-daemon-contract.md)。
 
 ---
 
 ## 当前进度与验证边界
 
-> **当前状态（`0.1.0-dev` —— 初始工程骨架）**：
-> - **已实现并验证**：Python 包与唯一命令行入口 `omm`（`uv` + `pytest`）、中英双语（`zh-CN` / `en`）i18n 词条机制、以及 Vite + React + TypeScript 前端工作台外壳（`tsc` 类型检查与生产构建）。
-> - **尚未开始（`0.1` 待建范围）**：结构化源稿解析器与稳定 `block_id` 索引、SSE/WebSocket 热同步工作台服务与批注存储、Git 审阅点三级 Diff 引擎，以及 Word（`.docx` OOXML/OMML/原生修订）与 LaTeX（`.tex`）目标编译器。外部旧 `.docx` 逆向拆包导入（`ingest`）留待 `0.2`。
+> **当前状态（`0.1.0-dev` —— 核心契约已定稿，编码实现待启动）**：
+> - **已实现并验证**：Python 包与 `omm` 命令行外壳（`uv` + `pytest`）、中英双语（`zh-CN` / `en`）i18n 词条机制、五版面 Vite + React + TypeScript 前端工作台外壳（`tsc` 类型检查与生产构建），以及两份基础架构契约（`ADR-001` 与 `ADR-002`）。
+> - **尚未开始（`0.1` 待建范围）**：全局共享 Skill 安装器与单实例固定回环守护服务、结构化源稿 AST 解析器与 `(revision, block_id)` 同步引擎、`.omm/annotations.json` 批注存储与 Git 审阅点三级 Diff 引擎，以及 Word（`.docx` OOXML/OMML/原生修订）与 LaTeX（`.tex`）目标编译器。外部旧 `.docx` 逆向拆包导入（`ingest`）留待 `0.2`。
 
 ---
 
