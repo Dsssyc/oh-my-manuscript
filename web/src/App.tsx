@@ -1,74 +1,93 @@
-import { useState } from "react";
-import { detectBrowserLocale, type Locale, type MessageKey, WEB_MESSAGES } from "./i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, subscribe, type WorkspaceEvent, type WorkspaceSummary } from "./api";
+import { detectBrowserLocale, translate } from "./i18n";
+import { ErrorNotice } from "./ErrorNotice";
+import { Workbench } from "./Workbench";
 
-type TabId = "manuscript" | "appendices" | "reviews" | "figures" | "references";
+function workspaceFromHash() {
+  const match = /^#workspaces\/([^/]+)$/.exec(window.location.hash);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
 
 export function App() {
-  const [locale, setLocale] = useState<Locale>(detectBrowserLocale);
-  const [activeTab, setActiveTab] = useState<TabId>("manuscript");
+  const [locale, setLocale] = useState(detectBrowserLocale);
+  const [hashId, setHashId] = useState(workspaceFromHash);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>();
+  const [error, setError] = useState<unknown>();
+  const [listVersion, setListVersion] = useState(0);
+  const listener = useRef<(event: WorkspaceEvent) => void>(null);
+  const t = translate(locale);
+  const selected = hashId ?? workspaces?.[0]?.workspace_id;
+  const summary = workspaces?.find((workspace) => workspace.workspace_id === selected);
 
-  const t = (key: MessageKey): string => WEB_MESSAGES[locale][key];
-  const tabs: readonly { id: TabId; labelKey: MessageKey }[] = [
-    { id: "manuscript", labelKey: "tab.manuscript" },
-    { id: "appendices", labelKey: "tab.appendices" },
-    { id: "reviews", labelKey: "tab.reviews" },
-    { id: "figures", labelKey: "tab.figures" },
-    { id: "references", labelKey: "tab.references" },
-  ];
+  useEffect(() => {
+    const onHash = () => setHashId(workspaceFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
-  return (
-    <div style={{ fontFamily: "system-ui, -apple-system, sans-serif", margin: 0, color: "#18181b" }}>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "12px 20px",
-          borderBottom: "1px solid #e4e4e7",
-        }}
-      >
-        <div>
-          <strong>{t("app.title")}</strong>
-          <span style={{ marginLeft: 12, color: "#52525b", fontSize: 14 }}>{t("app.subtitle")}</span>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <label style={{ fontSize: 13, color: "#52525b" }}>
-            {t("diff.label")}:{" "}
-            <select defaultValue="last_checkpoint">
-              <option value="last_checkpoint">{t("diff.last_checkpoint")}</option>
-              <option value="resolution_snapshot">{t("diff.resolution_snapshot")}</option>
-              <option value="submission_milestone">{t("diff.submission_milestone")}</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={() => setLocale(locale === "en" ? "zh-CN" : "en")}
-            style={{ padding: "4px 10px", cursor: "pointer" }}
-          >
-            {t("app.lang_toggle")}
-          </button>
-        </div>
-      </header>
-      <nav style={{ display: "flex", gap: 4, padding: "8px 20px", borderBottom: "1px solid #f4f4f5" }}>
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setActiveTab(tab.id)}
-            style={{
-              padding: "6px 12px",
-              border: "none",
-              borderBottom: activeTab === tab.id ? "2px solid #18181b" : "2px solid transparent",
-              background: "transparent",
-              fontWeight: activeTab === tab.id ? 600 : 400,
-              cursor: "pointer",
-            }}
-          >
-            {t(tab.labelKey)}
-          </button>
+  useEffect(() => subscribe((event) => {
+    if (event.type === "workspaces_changed" || event.type === "reconnected") setListVersion((value) => value + 1);
+    listener.current?.(event);
+  }), []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setError(undefined);
+    void api.workspaces(controller.signal).then(({ workspaces: list }) => {
+      if (!controller.signal.aborted) setWorkspaces(list);
+    }).catch((reason: unknown) => {
+      if (!controller.signal.aborted) setError(reason);
+    });
+    return () => controller.abort();
+  }, [listVersion]);
+
+  useEffect(() => { document.documentElement.lang = locale; }, [locale]);
+
+  const listen = useCallback((callback: (event: WorkspaceEvent) => void) => {
+    listener.current = callback;
+    return () => { if (listener.current === callback) listener.current = null; };
+  }, []);
+
+  function toggleLocale() {
+    const next = locale === "en" ? "zh-CN" : "en";
+    const url = new URL(window.location.href);
+    url.searchParams.set("lang", next);
+    window.history.replaceState(null, "", url);
+    setLocale(next);
+  }
+
+  return <div className="app">
+    <header className="masthead">
+      <span className="wordmark">{t("app.title")}</span>
+      <select className="workspace-select" aria-label={t("workspace.label")} value={selected ?? ""}
+        disabled={!selected} onChange={(event) => {
+          window.location.hash = `workspaces/${encodeURIComponent(event.target.value)}`;
+          setHashId(event.target.value);
+        }}>
+        {!selected && <option value="">{t("workspace.label")}</option>}
+        {selected && !summary &&
+          <option value={selected}>{selected}</option>}
+        {workspaces?.map((workspace) => (
+          <option key={workspace.workspace_id} value={workspace.workspace_id}>{workspace.title || workspace.path}</option>
         ))}
-      </nav>
-      <main style={{ padding: "32px 20px", color: "#52525b" }}>{t("empty.workspace")}</main>
-    </div>
-  );
+      </select>
+      <button type="button" className="quiet language" aria-label={t("app.language")} onClick={toggleLocale}>
+        {t("app.lang_toggle")}
+      </button>
+    </header>
+    <ErrorNotice error={error} t={t} dismiss={() => setError(undefined)} />
+    {selected ? <Workbench key={selected} workspaceId={selected} summaryUnsynced={summary?.has_unsynced_changes}
+      t={t} listen={listen} /> : (
+      <main className="empty">
+        <p>{t(error == null && !workspaces ? "workspace.loading" : "empty.workspace")}</p>
+        {error != null && <button type="button" onClick={() => setListVersion((value) => value + 1)}>{t("workspace.retry")}</button>}
+      </main>
+    )}
+  </div>;
 }
