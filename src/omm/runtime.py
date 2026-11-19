@@ -27,7 +27,7 @@ from platformdirs import user_data_path
 import omm
 from omm.errors import OmmError
 from omm.server import CONTRACT_VERSION, DEFAULT_PORT
-from omm.workspace import atomic_write_text, resolve_path
+from omm.workspace import atomic_write_text, fs_path, resolve_path
 
 _NAME = "oh-my-manuscript"
 _RUNTIME_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
@@ -52,10 +52,11 @@ import markdown_it
 import platformdirs
 import portalocker
 import pypdf
+from omm.workspace import resolve_path
 
-root = Path(sys.argv[1]).resolve()
-assert Path(sys.prefix).resolve() == root / "venv"
-assert root in Path(omm.__file__).resolve().parents
+root = resolve_path(Path(sys.argv[1]))
+assert resolve_path(Path(sys.prefix)) == root / "venv"
+assert root in resolve_path(Path(omm.__file__)).parents
 """
 
 
@@ -96,7 +97,7 @@ def skill_root() -> Path:
 def read_json_object(path: Path) -> dict | None:
     """Return None only when the file is absent."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(fs_path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     if not isinstance(data, dict):
@@ -170,7 +171,8 @@ def active_runtime() -> dict | None:
         ):
             raise ValueError("invalid active runtime")
         python = _python_path(Path(executable))
-        if not python.is_file() or not os.access(python, os.X_OK):
+        executable_path = fs_path(python)
+        if not executable_path.is_file() or not os.access(executable_path, os.X_OK):
             raise ValueError("runtime interpreter is unavailable")
         return {**data, "python": str(python)}
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
@@ -338,8 +340,9 @@ def _copy_distribution(distribution: metadata.Distribution, target: Path) -> Non
             or relative.name.startswith(("_virtualenv.", "__editable__", "_editable_"))
         ):
             continue
+        source_file = fs_path(path)
         if path.suffix == ".pth":
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = source_file.read_text(encoding="utf-8").splitlines()
             if any(
                 not resolve_path(source / line.strip()).is_relative_to(source)
                 or Path(line.strip()).is_absolute()
@@ -347,9 +350,9 @@ def _copy_distribution(distribution: metadata.Distribution, target: Path) -> Non
                 if line.strip() and not line.startswith(("#", "import ", "import\t"))
             ):
                 continue
-        destination = target / relative
+        destination = fs_path(target / relative)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, destination)
+        shutil.copy2(source_file, destination)
 
 
 def _content_id(
@@ -358,7 +361,7 @@ def _content_id(
     base = resolve_path(Path(getattr(sys, "_base_executable", sys.executable)))
     entries = [(str(base), tuple(sys.version_info))]
     entries.extend(
-        (relative.as_posix(), hashlib.sha256((source / relative).read_bytes()).hexdigest())
+        (relative.as_posix(), hashlib.sha256(fs_path(source / relative).read_bytes()).hexdigest())
         for relative in files
     )
     entries.extend(
@@ -370,7 +373,7 @@ def _content_id(
 
 def _write_project_metadata(site: Path, project: metadata.Distribution, files: list[Path]) -> None:
     info = site / f"oh_my_manuscript-{project.version}.dist-info"
-    info.mkdir()
+    fs_path(info).mkdir()
     atomic_write_text(info / "METADATA", project.metadata.as_string())
     atomic_write_text(info / "INSTALLER", "omm\n")
     record = io.StringIO()
@@ -380,7 +383,7 @@ def _write_project_metadata(site: Path, project: metadata.Distribution, files: l
         info.relative_to(site) / "METADATA",
         info.relative_to(site) / "INSTALLER",
     ]:
-        data = (site / relative).read_bytes()
+        data = fs_path(site / relative).read_bytes()
         digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
         writer.writerow((relative.as_posix(), f"sha256={digest}", len(data)))
     writer.writerow(((info.relative_to(site) / "RECORD").as_posix(), "", ""))
@@ -410,7 +413,8 @@ def _materialize(
     dependencies: dict[str, metadata.Distribution],
 ) -> bool:
     python = Path(ready["python"])
-    if root.is_symlink() or root.is_junction():
+    root_fs = fs_path(root)
+    if root_fs.is_symlink() or root_fs.is_junction():
         raise ValueError("runtime directory is a link")
     try:
         if read_json_object(root / "READY.json") == ready:
@@ -421,48 +425,49 @@ def _materialize(
 
     transaction = uuid4()
     staging = root.parent / f".staging-{transaction}"
-    previous = root.parent / f".replaced-{transaction}"
-    staging.mkdir(mode=0o700)
+    staging_fs = fs_path(staging)
+    previous_fs = fs_path(root.parent / f".replaced-{transaction}")
+    staging_fs.mkdir(mode=0o700)
     promoted = False
     try:
         environment = staging / "venv"
-        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(environment)
+        venv.EnvBuilder(with_pip=False, symlinks=os.name != "nt").create(fs_path(environment))
         site = _venv_site(environment)
         for dist in dependencies.values():
             _copy_distribution(dist, site)
-        (site / "omm" / "_web_dist").mkdir(parents=True, exist_ok=True)
+        fs_path(site / "omm" / "_web_dist").mkdir(parents=True, exist_ok=True)
         for relative in files:
-            destination = site / "omm" / relative
+            destination = fs_path(site / "omm" / relative)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source / relative, destination)
+            shutil.copy2(fs_path(source / relative), destination)
         _write_project_metadata(site, project, files)
-        if root.exists():
-            root.rename(previous)
-        staging.rename(root)
+        if root_fs.exists():
+            root_fs.rename(previous_fs)
+        staging_fs.rename(root_fs)
         promoted = True
         _check_python(root, python)
         write_json_object(root / "READY.json", ready)
     except BaseException:
         if promoted:
-            shutil.rmtree(root)
-        if previous.exists():
-            previous.rename(root)
+            shutil.rmtree(root_fs)
+        if previous_fs.exists():
+            previous_fs.rename(root_fs)
         raise
     finally:
-        if staging.exists():
-            shutil.rmtree(staging)
-    if previous.exists():
-        shutil.rmtree(previous)
+        if staging_fs.exists():
+            shutil.rmtree(staging_fs)
+    if previous_fs.exists():
+        shutil.rmtree(previous_fs)
     return True
 
 
 def _host_links(skill: Path) -> list[Path]:
     home = host_home()
     hosts = []
-    if (home / ".claude").is_dir():
+    if fs_path(home / ".claude").is_dir():
         hosts.append(home / ".claude" / "skills")
     gemini = home / ".gemini"
-    if (gemini / "antigravity").is_dir() or (gemini / "antigravity-cli").is_dir():
+    if fs_path(gemini / "antigravity").is_dir() or fs_path(gemini / "antigravity-cli").is_dir():
         hosts.append(gemini / "config" / "skills")
     return list(
         dict.fromkeys(
@@ -474,9 +479,10 @@ def _host_links(skill: Path) -> list[Path]:
 
 
 def _link_exists(path: Path, skill: Path) -> bool:
-    if not (os.path.lexists(path) or path.is_junction()):
+    link = fs_path(path)
+    if not (os.path.lexists(link) or link.is_junction()):
         return False
-    if (path.is_symlink() or path.is_junction()) and path.exists() and resolve_path(path) == skill:
+    if (link.is_symlink() or link.is_junction()) and link.exists() and resolve_path(link) == skill:
         return True
     raise OmmError("ERR_SKILL_TARGET_CONFLICT", path=path)
 
@@ -485,14 +491,13 @@ def _link_skill(path: Path, skill: Path) -> None:
     if _link_exists(path, skill):
         return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        fs_path(path.parent).mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
             # Quoted environment expansions avoid interpreting path characters as cmd syntax.
             subprocess.run(
                 'cmd.exe /d /v:off /s /c "mklink /J "%OMM_LINK%" "%OMM_LINK_TARGET%""',
                 env={**os.environ, "OMM_LINK": str(path), "OMM_LINK_TARGET": str(skill)},
                 capture_output=True,
-                text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 check=True,
             )
@@ -507,14 +512,15 @@ def _link_skill(path: Path, skill: Path) -> None:
 def _link_runtime(scripts: Path, runtime: Path) -> None:
     """Point scripts/.runtime at the active runtime directory."""
     link = scripts / ".runtime"
-    if os.path.lexists(link) or link.is_junction():
-        if not (link.is_symlink() or link.is_junction()):
+    link_fs = fs_path(link)
+    if os.path.lexists(link_fs) or link_fs.is_junction():
+        if not (link_fs.is_symlink() or link_fs.is_junction()):
             raise OmmError("ERR_FILE_WRITE", path=link, detail="not a runtime link")
         # Replace the previous runtime link; a junction needs rmdir, not unlink.
-        if link.is_junction():
-            link.rmdir()
+        if link_fs.is_junction():
+            link_fs.rmdir()
         else:
-            link.unlink()
+            link_fs.unlink()
     try:
         if os.name == "nt":
             # Quoted environment expansions avoid interpreting path characters as cmd syntax.
@@ -522,7 +528,6 @@ def _link_runtime(scripts: Path, runtime: Path) -> None:
                 'cmd.exe /d /v:off /s /c "mklink /J "%OMM_LINK%" "%OMM_LINK_TARGET%""',
                 env={**os.environ, "OMM_LINK": str(link), "OMM_LINK_TARGET": str(runtime)},
                 capture_output=True,
-                text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
                 check=True,
             )
@@ -535,10 +540,11 @@ def _link_runtime(scripts: Path, runtime: Path) -> None:
 def _write_skill(skill: Path, source: Path, ready: dict, links: list[Path]) -> None:
     for relative in (Path("SKILL.md"), Path("references", "syntax-and-cli.md")):
         path = skill / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(path, (source / "skill_bundle" / relative).read_bytes().decode("utf-8"))
+        fs_path(path.parent).mkdir(parents=True, exist_ok=True)
+        bundled = fs_path(source / "skill_bundle" / relative)
+        atomic_write_text(path, bundled.read_bytes().decode("utf-8"))
     scripts = skill / "scripts"
-    scripts.mkdir(exist_ok=True)
+    fs_path(scripts).mkdir(exist_ok=True)
     # cmd.exe decodes .cmd files with the console code page, so omm.cmd must
     # stay pure 7-bit ASCII: %~dp0 expands to its own Unicode directory and
     # reaches the interpreter through the co-located .runtime link.
@@ -572,18 +578,19 @@ def install_omm() -> dict:
     runtimes = root / "runtimes"
     skill = skill_root()
     try:
-        runtimes.mkdir(parents=True, exist_ok=True)
-        with portalocker.Lock(runtimes / "install.lock", mode="ab", timeout=30):
+        fs_path(runtimes).mkdir(parents=True, exist_ok=True)
+        with portalocker.Lock(fs_path(runtimes / "install.lock"), mode="ab", timeout=30):
             links = _host_links(skill)
             for path in links:
                 _link_exists(path, skill)
             project = metadata.distribution(_NAME)
             dependencies = _distributions(project)
             source = resolve_path(Path(omm.__file__)).parent
+            source_fs = fs_path(source)
             files = sorted(
-                path.relative_to(source)
-                for path in source.rglob("*")
-                if path.is_file() and _copyable(path.relative_to(source))
+                relative
+                for path in source_fs.rglob("*")
+                if path.is_file() and _copyable(relative := path.relative_to(source_fs))
             )
             runtime_id = _content_id(source, files, dependencies)
             directory = runtimes / runtime_id

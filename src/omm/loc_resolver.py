@@ -23,6 +23,7 @@ from omm import ast
 from omm.errors import OmmError
 from omm.git_revs import RevisionSnapshot
 from omm.numbering import NumberedWorkspace
+from omm.workspace import resolve_path
 
 
 class BlockRecordLike(Protocol):
@@ -78,6 +79,7 @@ _NUMBER_COLUMN_WIDTH = 24  # Accommodates right-aligned labels with differing di
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
 _EQUATION_NUMBER = re.compile(r"\([A-Za-z]*[0-9]+\)")
 _MATH_DELIMITERS = frozenset("()[]{}|‖⟨⟩")
+_MATH_STRUCTURE = _MATH_DELIMITERS | frozenset("√∛∜∑∏∫∬∭∮⋃⋂")
 _LIST_MARKER = re.compile(r"^(?:[•◦▪●‣∙\uf0b7–-]|[0-9]+[.)])(?:\s+|$)")
 
 
@@ -286,9 +288,18 @@ def _consume_line(line: _VisualLine, expected: str, kind: str) -> str | None:
     if kind == "list":
         parts = (_LIST_MARKER.sub("", parts[0]), *parts[1:])
     remaining = expected
-    for part in parts:
+    for index, part in enumerate(parts):
         if not remaining.startswith(part):
-            return None
+            stem = part[:-1]
+            if (
+                index == len(parts) - 1
+                and part.endswith(("-", "‐"))
+                and remaining.startswith(stem)
+                and remaining[len(stem) : len(stem) + 1].isalpha()
+            ):
+                part = stem
+            else:
+                return None
         # PDF fragments may split a word or omit spaces at their boundaries.
         remaining = remaining[len(part) :].lstrip()
     return remaining if remaining != expected else None
@@ -341,7 +352,7 @@ def _math_order_matches(actual: str, expected: str) -> bool:
     for character in actual:
         if position < len(expected) and character == expected[position]:
             position += 1
-        elif character not in _MATH_DELIMITERS:
+        elif character not in _MATH_STRUCTURE:
             return False
     return position == len(expected)
 
@@ -375,9 +386,8 @@ def _match_equation(
             parts = parts[:-1]
         text = _math_chars("".join(parts))
         observed.update(text)
-        # OMML stores some delimiters in attributes that are absent from the
-        # block text. Every other glyph, and any recorded delimiter, must match.
-        if (observed - expected.characters).keys() - _MATH_DELIMITERS:
+        # OMML can encode delimiters, radicals and operators outside its text runs.
+        if (observed - expected.characters).keys() - _MATH_STRUCTURE:
             break
         if found_number and expected.characters <= observed:
             # A flat equation can also be checked in left-to-right order.
@@ -405,6 +415,7 @@ def _align_block(
         start = anchors.get(getattr(block, "start_linelabel", None))
     if end is None:
         end = anchors.get(getattr(block, "end_linelabel", None))
+    unnumbered = ()
     best = ()
     best_distance = (float("inf"), float("inf"))
     for index in range(cursor, len(lines)):
@@ -414,6 +425,13 @@ def _align_block(
             else _match_lines(lines, index, expected, block.kind)
         )
         if not matched:
+            continue
+        if start is None and end is None:
+            numbered = (lines[i].number is not None for i in matched)
+            if (any(numbered) if equation is not None else all(numbered)):
+                return matched
+            if not unnumbered:
+                unnumbered = matched
             continue
         endpoints = ((lines[index], start), (lines[matched[-1]], end))
         distance = (
@@ -428,7 +446,7 @@ def _align_block(
             return matched
         if distance < best_distance:
             best, best_distance = matched, distance
-    return best
+    return best or unnumbered
 
 
 def resolve_blocks_from_pdf(
@@ -585,7 +603,7 @@ def paginate_docx_headless(
     )
     try:
         with TemporaryDirectory(prefix="omm-docx-layout-") as directory:
-            work_dir = Path(directory).resolve()
+            work_dir = resolve_path(Path(directory))
             _run_headless(
                 [
                     executable,
@@ -595,7 +613,7 @@ def paginate_docx_headless(
                     options,
                     "--outdir",
                     str(work_dir),
-                    str(clean_docx.resolve()),
+                    str(resolve_path(clean_docx)),
                 ],
                 work_dir,
             )
@@ -632,7 +650,7 @@ def paginate_latex_headless(
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix="omm-tex-layout-", dir=work_dir) as directory:
-            run_dir = Path(directory).resolve()
+            run_dir = resolve_path(Path(directory))
             source_dir = run_dir / "source"
             source_dir.mkdir()
             tex_cache = run_dir / "texmf"
@@ -641,7 +659,7 @@ def paginate_latex_headless(
             entry = run_dir / clean_tex.name
             entry.write_text(_TEX_LAYOUT_INPUT, encoding="ascii")
             tex_inputs = os.pathsep.join(
-                (str(clean_tex.resolve().parent), os.environ.get("TEXINPUTS", ""))
+                (str(resolve_path(clean_tex).parent), os.environ.get("TEXINPUTS", ""))
             )
             env = {
                 **os.environ,

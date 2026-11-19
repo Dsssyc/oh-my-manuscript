@@ -216,11 +216,11 @@ _DIAGNOSTICS = {
     "ERR_LOCATION_LAYOUT_REQUIRED": (
         (
             "Cannot resolve location references for {deliverable} ({clean_file}): "
-            "pass --layout-pdf {deliverable}=PATH or install headless LibreOffice (soffice) / TeX."
+            "pass --layout-pdf [TARGET:]{deliverable}=PATH or install headless LibreOffice (soffice) / TeX."
         ),
         (
             "无法反解投稿产物 {deliverable}（{clean_file}）的物理页码与行号："
-            "请传入 --layout-pdf {deliverable}=PATH，或安装无头 LibreOffice（soffice）/ TeX 依赖。"
+            "请传入 --layout-pdf [TARGET:]{deliverable}=PATH，或安装无头 LibreOffice（soffice）/ TeX 依赖。"
         ),
     ),
     "ERR_LOCATION_RANGE_AMBIGUOUS": (
@@ -399,8 +399,8 @@ _CLI_MESSAGES = {
         "修订稿的投稿里程碑（默认选择最新的祖先 v*-submitted 标签，如有）。",
     ),
     "cli.build_layout_pdf_help": (
-        "Numbered PDF of a Clean deliverable (repeat for each layout).",
-        "指定带页边行号的 Clean 产物 PDF（可多次指定）。",
+        "Numbered PDF of a Clean deliverable (prefix with docx: or latex: when --target all).",
+        "指定带页边行号的 Clean 产物 PDF（当 --target all 时需加 docx: 或 latex: 前缀）。",
     ),
     "cli.build_done": (
         "Built revision {revision} in {out_dir}.",

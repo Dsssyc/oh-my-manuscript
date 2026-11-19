@@ -244,7 +244,7 @@ def build_parser(locale: Locale) -> argparse.ArgumentParser:
                 "--milestone", metavar="REV", help=t("cli.build_milestone_help", locale)
             )
             subparser.add_argument(
-                "--layout-pdf", action="append", default=[], metavar="DELIVERABLE=PATH",
+                "--layout-pdf", action="append", default=[], metavar="[TARGET:]DELIVERABLE=PATH",
                 help=t("cli.build_layout_pdf_help", locale),
             )
             _add_json_option(subparser, locale)
@@ -271,10 +271,15 @@ def _print_json(value: object) -> None:
 def _run_build(root: Path, args: argparse.Namespace, locale: Locale) -> None:
     layout_pdfs = {}
     for value in args.layout_pdf:
-        name, sep, path = value.partition("=")
+        key, sep, path = value.partition("=")
+        target, qualified, name = key.partition(":")
+        if not qualified:
+            target, name = args.target, key
         if not sep or not name.strip() or not path:
             raise OmmError("ERR_BAD_REQUEST")
-        layout_pdfs[name] = Path(path)
+        if target not in {"docx", "latex"} or args.target not in {target, "all"}:
+            raise OmmError("ERR_BAD_REQUEST")
+        layout_pdfs.setdefault(target, {})[name] = Path(path)
     result = build_workspace(
         root, target=args.target, out_dir=args.out_dir, revision=args.revision,
         milestone=args.milestone, layout_pdfs=layout_pdfs,

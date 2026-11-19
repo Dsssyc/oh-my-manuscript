@@ -76,7 +76,7 @@ def build_workspace(
     out_dir: Path | None = None,
     revision: str | None = None,
     milestone: str | None = None,
-    layout_pdfs: Mapping[str, Path] | None = None,
+    layout_pdfs: Mapping[str, Mapping[str, Path]] | None = None,
 ) -> dict[str, object]:
     """Build the requested formats and return a JSON-ready artifact inventory."""
     repo = _Repository(root)
@@ -95,18 +95,32 @@ def build_workspace(
     previous = _load_snapshot(repo.root, milestone) if milestone is not None else None
     numbered = number_workspace(snapshot)
     targets: tuple[Target, ...] = ("docx", "latex") if target == "all" else (target,)
-    pdfs = layout_pdfs or {}
+    layouts = layout_pdfs or {}
     final_dir = resolve_path(out_dir or snapshot.workspace.resolve(".omm/build"))
+    workspace_root = snapshot.workspace.root
+    metadata_dir = workspace_root / ".omm"
+    if (
+        final_dir == resolve_path(metadata_dir)
+        or workspace_root.is_relative_to(final_dir)
+        or (
+            final_dir.is_relative_to(workspace_root)
+            and not final_dir.is_relative_to(metadata_dir)
+        )
+    ):
+        raise OmmError("ERR_WORKSPACE_PATH_INVALID", path=final_dir, value=str(final_dir))
     primary = []
     replies = []
     for name, deliverable in snapshot.workspace.deliverables.items():
         (replies if deliverable.kind == "response_letter" else primary).append(name)
-    for name in pdfs:
-        if name not in primary:
-            raise OmmError(
-                "ERR_LAYOUT_PDF_INVALID", deliverable=name,
-                detail="Expected the name of a line-numbered deliverable.",
-            )
+    for fmt, pdfs in layouts.items():
+        if fmt not in targets:
+            raise OmmError("ERR_BAD_REQUEST")
+        for name in pdfs:
+            if name not in primary:
+                raise OmmError(
+                    "ERR_LAYOUT_PDF_INVALID", deliverable=name,
+                    detail="Expected the name of a line-numbered deliverable.",
+                )
 
     deliverables = {}
     locations = {}
@@ -117,11 +131,13 @@ def build_workspace(
             files = set()
             stale_marked = []
             for fmt in targets:
+                pdfs = layouts.get(fmt, {})
                 compiler = _COMPILERS[fmt]
                 if fmt == "latex":
                     compiled = compile_latex_workspace(
                         snapshot, staging, milestone=previous, deliverables=primary,
                         pdf_deliverables=pdfs.keys(),
+                        shared_asset_deliverables=replies,
                     )
                 else:
                     compiled = compile_docx_workspace(
@@ -165,6 +181,12 @@ def build_workspace(
                         "marked": str(final_dir / marked) if marked is not None else None,
                         "assets": [str(final_dir / asset) for asset in assets],
                     }
+            for relative in files | set(stale_marked):
+                parent = resolve_path((final_dir / relative).parent)
+                if not parent.is_relative_to(final_dir):
+                    raise OmmError(
+                        "ERR_WORKSPACE_PATH_INVALID", path=parent, value=str(parent)
+                    )
             for relative in sorted(files):
                 destination = final_dir / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)

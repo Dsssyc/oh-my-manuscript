@@ -423,6 +423,24 @@ def test_native_table_revisions_preserve_grid_and_borders(tmp_path: Path, same_g
             assert _xml(note, f"w:pPr/w:rPr/w:{mark}")
 
 
+def test_table_group_rule_spans_shifted_header_groups(tmp_path):
+    source = """:::{table} {#tbl-groups}
+Groups.
+
+| A | Group | > | Repeated | > |
+| Shifted | > | > | Inner | > |
+| C | D | E | F | G |
+|---|---|---|---|---|
+| 1 | 2 | 3 | 4 | 5 |
+:::
+"""
+    clean = compile_docx_workspace(_snapshot(source), tmp_path)["manuscript"].clean_path
+    doc = _read(clean)
+    assert _xml(doc, "//w:tr[1]/w:tc[2]/w:tcPr/w:tcBorders/w:bottom/@w:sz") == ["4"]
+    assert not _xml(doc, "//w:tr[1]/w:tc[3]/w:tcPr/w:tcBorders/w:bottom")
+    assert _xml(doc, "//w:tr[2]/w:tc[2]/w:tcPr/w:tcBorders/w:bottom/@w:sz") == ["4"]
+
+
 FIGURE = """:::{figure} {#fig-catchment cols=2}
 ![Terrain](figures/map.png){#fig-map}
 ![Channel](figures/channel.png){#fig-channel}
@@ -818,7 +836,7 @@ def test_supplementary_revisions_and_marked_bytes_are_repeatable(tmp_path: Path)
 
 
 def test_nested_lists_restart_and_preserve_code(tmp_path: Path) -> None:
-    source = """3. Ordered
+    source = """3. ## Ordered
    - Nested bullet
    - Nested second
 4. Ordered second {#li-first}
@@ -832,6 +850,9 @@ def test_nested_lists_restart_and_preserve_code(tmp_path: Path) -> None:
     path = compile_docx_workspace(_snapshot(source), tmp_path)["manuscript"].clean_path
     doc = _read(path)
     assert _xml(doc, "//w:pPr/w:numPr/w:ilvl/@w:val") == ["0", "1", "1", "0", "0"]
+    assert _xml(doc, "//w:p[w:pPr/w:numPr and w:pPr/w:pStyle/@w:val='Heading2']//w:t/text()") == [
+        "Ordered",
+    ]
     assert "Retained code" in _text(doc)
     numbering = _read(path, "word/numbering.xml")
     assert set(_xml(numbering, "//w:startOverride/@w:val")) == {"3"}

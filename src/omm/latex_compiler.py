@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -32,7 +31,7 @@ from omm.omml import (
     build_numbered_equation_paragraph,
     latex_to_omml,
 )
-from omm.parser import _markdown
+from omm.parser import _line_bounds, _markdown
 from omm.workspace import DeliverableKind, Style, Workspace, atomic_write_text
 
 __all__ = [
@@ -59,7 +58,10 @@ _TEX_SPECIALS = {
 # Inside \href destinations a literal ~ must survive verbatim.
 _HREF_SPECIALS = dict(_TEX_SPECIALS, **{"~": r"\string~"})
 
-_HEADING_COMMANDS = {1: "section", 2: "subsection", 3: "subsubsection", 4: "paragraph"}
+_HEADING_COMMANDS = {
+    1: "section", 2: "subsection", 3: "subsubsection", 4: "paragraph", 5: "subparagraph",
+    6: "subsubparagraph",
+}
 _ALIGN_LETTERS: dict[str | None, str] = {"left": "l", "center": "c", "right": "r", None: "l"}
 _ENV_RES = tuple(
     (env, re.compile(rf"\\begin\s*\{{\s*{re.escape(env)}\s*\}}")) for env in _NUMBERED_ENVS
@@ -76,10 +78,6 @@ _CJK_NAMES = (
     "HALFWIDTH HANGUL ",
     "BOPOMOFO ",
 )
-# ListBlock inlines are flattened across items, so item starts are recovered
-# from the marker lines of the block's own source span (shared base indent).
-_LIST_ITEM = re.compile(r"[ \t]*(?:[-+*]|\d{1,9}[.)])(?:\s+|$)")
-
 _DIF_PREAMBLE = """%DIF latexdiff revision macros (ulem + xcolor)
 \\providecommand{\\DIFadd}[1]{{\\protect\\color{blue}\\uwave{#1}}}
 \\providecommand{\\DIFdel}[1]{{\\protect\\color{red}\\sout{#1}}}
@@ -132,6 +130,13 @@ class _Tok:
     text: str
     structural: bool = False
     atom: bool = False
+    children: tuple[_Tok, ...] | None = None
+
+    @property
+    def latex(self) -> str:
+        if self.children is None:
+            return self.text
+        return f"{self.text}{{{_join(self.children)}}}"
 
 
 @dataclass
@@ -149,7 +154,7 @@ class _Ctx:
     local_blocks: frozenset[str] = frozenset()
     local_citations: frozenset[str] = frozenset()
     asset_alias: Mapping[str, str] = field(default_factory=dict)
-    document: ast.Document | None = None
+    heading_level: int = 0
     records: list[LatexBlockRecord] = field(default_factory=list)
 
 
@@ -196,7 +201,7 @@ def _text_tokens(value: str) -> list[_Tok]:
 
 
 def _join(tokens: Sequence[_Tok]) -> str:
-    return "".join(token.text for token in tokens)
+    return "".join(token.latex for token in tokens)
 
 
 # ---------------------------------------------------------------------------
@@ -282,20 +287,21 @@ def _render_inlines(
             case ast.InlineMath(latex=latex):
                 tokens.append(_Tok(f"${latex}$", atom=True))
             case ast.Strong():
-                tokens.extend(_wrapped(ctx, node, "\\textbf", quoted_source))
+                tokens.append(_wrapped(ctx, node, "\\textbf", quoted_source))
             case ast.Emphasis():
-                tokens.extend(_wrapped(ctx, node, "\\emph", quoted_source))
+                tokens.append(_wrapped(ctx, node, "\\emph", quoted_source))
             case ast.Subscript():
-                tokens.extend(_wrapped(ctx, node, "\\textsubscript", quoted_source))
+                tokens.append(_wrapped(ctx, node, "\\textsubscript", quoted_source))
             case ast.Superscript():
-                tokens.extend(_wrapped(ctx, node, "\\textsuperscript", quoted_source))
+                tokens.append(_wrapped(ctx, node, "\\textsuperscript", quoted_source))
             case ast.Link(destination=destination):
                 inner = _join(_render_inlines(ctx, node.children, quoted_source=quoted_source))
                 tokens.append(
                     _Tok(f"\\href{{{_escape_href(destination)}}}{{{inner}}}", atom=True)
                 )
             case ast.Image(destination=destination):
-                tokens.append(_Tok(f"\\includegraphics{{{_escape(destination)}}}", atom=True))
+                path = _graphics_path(ctx, destination)
+                tokens.append(_Tok(f"\\includegraphics{{{path}}}", atom=True))
             case ast.BlockRef(block_id=target):
                 number = _block_number(ctx, target)
                 label = _ref_text(number.label if number else target)
@@ -316,12 +322,9 @@ def _colored(text: str) -> str:
 
 def _wrapped(
     ctx: _Ctx, node: ast.InlineContainer, command: str, quoted_source: str | None = None
-) -> list[_Tok]:
-    return [
-        _Tok(f"{command}{{", structural=True),
-        *_render_inlines(ctx, node.children, quoted_source=quoted_source),
-        _Tok("}", structural=True),
-    ]
+) -> _Tok:
+    children = tuple(_render_inlines(ctx, node.children, quoted_source=quoted_source))
+    return _Tok(command, atom=True, children=children)
 
 
 def _citation_tokens(ctx: _Ctx, citation: ast.Citation) -> list[_Tok]:
@@ -408,16 +411,25 @@ def _marked(tokens: Sequence[_Tok], *, deleted: bool, float_mode: bool) -> str:
             flush()
             pieces.append(token.text)
         else:
-            run.append(f"\\mbox{{{token.text}}}" if token.atom else token.text)
+            run.append(f"\\mbox{{{token.latex}}}" if token.atom else token.latex)
     flush()
-    return f"{begin} " + "".join(pieces) + end
+    return f"{begin} " + "".join(pieces) + f"{end}{{}}"
 
 
 def _diff_tokens(old: Sequence[_Tok], new: Sequence[_Tok], *, float_mode: bool) -> str:
     parts: list[str] = []
-    for op, i, j, k, last in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+    # Formatting containers can match by command, but their braces always stay together.
+    old_keys = [token if token.children is None else token.text for token in old]
+    new_keys = [token if token.children is None else token.text for token in new]
+    for op, i, j, k, last in SequenceMatcher(None, old_keys, new_keys, autojunk=False).get_opcodes():
         if op == "equal":
-            parts.extend(token.text for token in old[i:j])
+            for before, after in zip(old[i:j], new[k:last]):
+                if before == after:
+                    parts.append(after.latex)
+                else:
+                    assert before.children is not None and after.children is not None
+                    inner = _diff_tokens(before.children, after.children, float_mode=float_mode)
+                    parts.append(f"{after.text}{{{inner}}}")
             continue
         if op in {"delete", "replace"}:
             parts.append(_marked(old[i:j], deleted=True, float_mode=float_mode))
@@ -484,7 +496,7 @@ def _render_block(ctx: _Ctx, block: ast.Block, *, deleted: bool = False) -> str:
 def _render_heading(
     ctx: _Ctx, block: ast.Heading, *, deleted: bool, title: str | None = None
 ) -> str:
-    command = _HEADING_COMMANDS.get(block.level, "subparagraph")
+    command = _HEADING_COMMANDS[block.level]
     if title is None:
         title = _join(_render_inlines(ctx, block.inlines))
     # Deleted headings use starred forms so they never advance section counters.
@@ -496,7 +508,15 @@ def _render_heading(
         text = f"{number.number} {text}"
     _record(ctx, block, "heading", text)
     start, end = _line_marks(ctx, block.block_id)
-    return f"{start}\\{command}{{{title}}}{_block_label(ctx, block.block_id)}{end}"
+    level = block.level
+    counters = "".join(
+        f"\\setcounter{{{_HEADING_COMMANDS[ancestor]}}}{{1}}\n"
+        for ancestor in range(ctx.heading_level + 1, level)
+    )
+    if level > ctx.heading_level + 1:
+        counters += f"\\setcounter{{{command}}}{{0}}\n"
+    ctx.heading_level = level
+    return f"{counters}{start}\\{command}{{{title}}}{_block_label(ctx, block.block_id)}{end}"
 
 
 def _render_paragraph(
@@ -510,56 +530,85 @@ def _render_paragraph(
     return f"{start}{_block_label(ctx, block.block_id)}{body}{end}"
 
 
-def _list_item_starts(document: ast.Document, block: ast.ListBlock) -> list[int]:
-    """Item content starts, relative to ``block.source_span.start`` like the
-    parser's inline spans."""
-    raw = document.source[block.source_span.start : block.source_span.end]
-    base = raw[: len(raw) - len(raw.lstrip(" \t"))]
-    starts: list[int] = []
-    offset = 0
-    for line in raw.split("\n"):
-        if line.startswith(base) and (match := _LIST_ITEM.match(line, len(base))):
-            starts.append(offset + match.end())
-        offset += len(line) + 1
-    return starts
+type _ListPart = str | list[_Tok]
 
 
-def _item_nodes(ctx: _Ctx, block: ast.ListBlock) -> list[tuple[ast.Inline, ...]]:
-    """Inline node groups per list item.
+def _list_parts(
+    ctx: _Ctx, block: ast.ListBlock
+) -> tuple[list[_ListPart], list[str], list[int]]:
+    parts: list[_ListPart] = []
+    plain = []
+    item_starts = []
+    bounds = _line_bounds(block.clean_source)
+    counters: list[str] = []
+    environments: list[str] = []
+    for token in _PLAIN_MARKDOWN.parse(block.clean_source):
+        if token.type in {"bullet_list_open", "ordered_list_open"}:
+            ordered = token.type == "ordered_list_open"
+            environment = "enumerate" if ordered else "itemize"
+            environments.append(environment)
+            parts.append(f"\\begin{{{environment}}}")
+            if ordered:
+                counter = ("enumi", "enumii", "enumiii", "enumiv")[min(len(counters), 3)]
+                counters.append(counter)
+                start = int(token.attrGet("start") or 1)
+                if start != 1:
+                    parts.append(f"\\setcounter{{{counter}}}{{{start - 1}}}")
+        elif token.type in {"bullet_list_close", "ordered_list_close"}:
+            parts.append(f"\\end{{{environments.pop()}}}")
+            if token.type == "ordered_list_close":
+                counters.pop()
+        elif token.type == "list_item_open":
+            if len(environments) == 1:
+                item_starts.append(len(parts))
+            parts.append(r"\item")
+        elif token.type == "blockquote_open" and environments:
+            parts.append(r"\begin{quote}")
+        elif token.type == "blockquote_close" and environments:
+            parts.append(r"\end{quote}")
+        elif token.type in {"paragraph_open", "heading_open"}:
+            first, last = token.map
+            nodes = tuple(
+                node for node in block.inlines if bounds[first] <= node.span.start < bounds[last]
+            )
+            inline = _render_inlines(ctx, nodes)
+            if token.type == "heading_open":
+                inline = [_Tok(r"\textbf", atom=True, children=tuple(inline))]
+            parts.extend((inline, r"\par"))
+            plain.append(_plain(ctx, nodes))
+        elif token.type in {"fence", "code_block"}:
+            parts.append(_literal_code(token.content.rstrip("\n")))
+            plain.append(token.content)
+        elif token.type == "omm_display":
+            parts.append(f"\\[{token.content}\n\\]")
+            plain.append(token.content)
+        elif token.type == "hr":
+            parts.append(r"\noindent\rule{\linewidth}{0.4pt}")
+    return parts, plain, item_starts
 
-    The AST flattens item inlines into one stream, so items are re-grouped by
-    the marker lines of the block's source span.  Literal list content (fenced
-    code) carries no inline nodes and yields no item.
-    """
-    assert ctx.document is not None
-    starts = _list_item_starts(ctx.document, block)
-    buckets: list[list[ast.Inline]] = [[] for _ in starts]
-    for node in block.inlines:
-        index = max(bisect_right(starts, node.span.start) - 1, 0)
-        buckets[index].append(node)
-    return [tuple(nodes) for nodes in buckets if nodes]
 
-
-def _item_tokens(ctx: _Ctx, block: ast.ListBlock) -> list[list[_Tok]]:
-    return [_render_inlines(ctx, nodes) for nodes in _item_nodes(ctx, block)]
+def _render_list_parts(
+    parts: Sequence[_ListPart], *, deleted: bool = False, inserted: bool = False,
+) -> str:
+    rendered_parts = []
+    for part in parts:
+        if isinstance(part, str):
+            rendered_parts.append(part)
+        elif deleted or inserted:
+            rendered_parts.append(_marked(part, deleted=deleted, float_mode=False))
+        else:
+            rendered_parts.append(_join(part))
+    return "\n".join(rendered_parts)
 
 
 def _render_list(
-    ctx: _Ctx, block: ast.ListBlock, *, deleted: bool, items: list[str] | None = None
+    ctx: _Ctx, block: ast.ListBlock, *, deleted: bool, inserted: bool = False
 ) -> str:
-    environment = "enumerate" if block.ordered else "itemize"
-    item_tokens = _item_tokens(ctx, block)
+    parts, plain, _ = _list_parts(ctx, block)
+    rendered = _render_list_parts(parts, deleted=deleted, inserted=inserted)
     if deleted:
-        body = "\n".join(
-            f"\\item {_diff_tokens(tokens, (), float_mode=False)}" for tokens in item_tokens
-        )
-        rendered = f"\\begin{{{environment}}}\n{body}\n\\end{{{environment}}}"
         return rendered
-    if items is None:
-        items = [_join(tokens) for tokens in item_tokens]
-    body = "\n".join(f"\\item {item}" for item in items)
-    rendered = f"\\begin{{{environment}}}\n{body}\n\\end{{{environment}}}"
-    _record(ctx, block, "list", " ".join(_plain(ctx, nodes) for nodes in _item_nodes(ctx, block)))
+    _record(ctx, block, "list", " ".join(" ".join(plain).split()))
     start, end = _line_marks(ctx, block.block_id)
     return f"{start}{_block_label(ctx, block.block_id)}{rendered}{end}"
 
@@ -569,7 +618,7 @@ def _render_equation(ctx: _Ctx, block: ast.DisplayMath, *, deleted: bool) -> str
     # Deleted equations use the star form so they never advance the counter;
     # _render_deleted supplies the surrounding DIFdelbegin/DIFdelend markers.
     if deleted:
-        return f"\\[{latex}\\]"
+        return f"\\[{latex}\n\\]"
     if ctx.pdf_layout:
         number = ctx.numbered.block_numbers[ctx.name].get(block.block_id)
         equation = build_numbered_equation_paragraph(
@@ -581,18 +630,20 @@ def _render_equation(ctx: _Ctx, block: ast.DisplayMath, *, deleted: bool) -> str
     _record(ctx, block, "display_math", text)
     start, end = _line_marks(ctx, block.block_id)
     if block.unnumbered:
-        return f"{start}{_block_label(ctx, block.block_id)}\\[{latex}\\]{end}"
+        return f"{start}{_block_label(ctx, block.block_id)}\\[{latex}\n\\]{end}"
     label = _block_label(ctx, block.block_id)
-    body = f"\\begin{{equation}}{label} {latex} \\end{{equation}}"
+    body = f"\\begin{{equation}}{label} {latex}\n\\end{{equation}}"
     return f"{start}{body}{end}"
 
 
 def _graphics_path(ctx: _Ctx, asset_path: str) -> str:
-    return _escape(ctx.asset_alias.get(asset_path, asset_path))
+    # graphicx reads underscores as filename characters, including in archive aliases.
+    return _escape(ctx.asset_alias.get(asset_path, asset_path)).replace(r"\_", "_")
 
 
 def _render_figure(
-    ctx: _Ctx, block: ast.FigureBlock, *, deleted: bool, caption: str | None = None
+    ctx: _Ctx, block: ast.FigureBlock, *, deleted: bool, caption: str | None = None,
+    panel_captions: Sequence[str] | None = None,
 ) -> str:
     if caption is None:
         caption = _join(_render_inlines(ctx, block.caption.inlines))
@@ -604,10 +655,15 @@ def _render_figure(
         lines.append(
             f"\\includegraphics[width=\\linewidth]{{{_graphics_path(ctx, panels[0].asset_path)}}}"
         )
+        if not deleted:
+            figure_label += _block_label(ctx, panels[0].block_id)
     else:
         columns = block.cols or len(panels)
         width = f"{1 / columns:.3f}"
-        rows = [panels[index : index + columns] for index in range(0, len(panels), columns)]
+        if panel_captions is None:
+            panel_captions = [_escape(panel.alt) for panel in panels]
+        entries = list(zip(panels, panel_captions))
+        rows = [entries[index : index + columns] for index in range(0, len(entries), columns)]
         lines.extend(_figure_rows(ctx, rows, width, deleted=deleted))
     lines.append(f"{caption_command}{{{caption}}}{figure_label}")
     lines.append("\\end{figure}")
@@ -615,11 +671,11 @@ def _render_figure(
 
 
 def _figure_rows(
-    ctx: _Ctx, rows: Sequence[Sequence[ast.Subfigure]], width: str, *, deleted: bool
+    ctx: _Ctx, rows: Sequence[Sequence[tuple[ast.Subfigure, str]]], width: str, *, deleted: bool
 ) -> list[str]:
     lines: list[str] = []
     for index, row in enumerate(rows):
-        for position, panel in enumerate(row):
+        for position, (panel, caption) in enumerate(row):
             command = "\\caption*" if deleted else "\\caption"
             label = "" if deleted else _block_label(ctx, panel.block_id)
             lines.append(f"\\begin{{subfigure}}[t]{{{width}\\textwidth}}")
@@ -627,7 +683,7 @@ def _figure_rows(
             lines.append(
                 f"\\includegraphics[width=\\linewidth]{{{_graphics_path(ctx, panel.asset_path)}}}"
             )
-            lines.append(f"{command}{{{_escape(panel.alt)}}}{label}")
+            lines.append(f"{command}{{{caption}}}{label}")
             closing = "\\end{subfigure}\\hfill%" if position < len(row) - 1 else "\\end{subfigure}"
             lines.append(closing)
         if index < len(rows) - 1:
@@ -753,15 +809,27 @@ def _code_block(block: ast.MarkdownBlock) -> str:
         for token in tokens
         if token.type in {"fence", "code_block"}
     )
-    return f"\\begin{{verbatim}}\n{content}\n\\end{{verbatim}}"
+    return _literal_code(content)
 
 
-def _render_markdown(ctx: _Ctx, block: ast.MarkdownBlock, *, deleted: bool) -> str:
+def _literal_code(content: str) -> str:
+    if r"\end{verbatim}" not in content:
+        return f"\\begin{{verbatim}}\n{content}\n\\end{{verbatim}}"
+    lines = [_escape(line).replace(" ", r"\ ") for line in content.expandtabs().split("\n")]
+    return "\n".join(f"\\noindent\\texttt{{\\strut {line}}}\\par" for line in lines)
+
+
+def _render_markdown(
+    ctx: _Ctx, block: ast.MarkdownBlock, *, deleted: bool, inserted: bool = False
+) -> str:
     if block.kind in {"fence", "code_block"}:
         return _code_block(block)
     if block.kind == "hr":
         return "\\noindent\\rule{\\linewidth}{0.4pt}"
-    rendered = (_render_block(ctx, child, deleted=deleted) for child in block.children)
+    rendered = (
+        _render_inserted(ctx, child) if inserted else _render_block(ctx, child, deleted=deleted)
+        for child in block.children
+    )
     inner = "\n\n".join(part for part in rendered if part)
     if block.kind != "blockquote":
         return inner
@@ -800,6 +868,30 @@ def _render_deleted(ctx: _Ctx, block: ast.Block) -> str:
 
 
 def _render_inserted(ctx: _Ctx, block: ast.Block) -> str:
+    match block:
+        case ast.Heading():
+            title = _marked(_render_inlines(ctx, block.inlines), deleted=False, float_mode=True)
+            return _render_heading(ctx, block, deleted=False, title=title)
+        case ast.Paragraph():
+            content = _marked(_render_inlines(ctx, block.inlines), deleted=False, float_mode=False)
+            return _render_paragraph(ctx, block, deleted=False, content=content)
+        case ast.ListBlock():
+            return _render_list(ctx, block, deleted=False, inserted=True)
+        case ast.FigureBlock() | ast.TableBlock():
+            caption = _marked(
+                _render_inlines(ctx, block.caption.inlines), deleted=False, float_mode=True
+            )
+            if isinstance(block, ast.TableBlock):
+                return _render_table(ctx, block, deleted=False, caption=caption)
+            panel_captions = [
+                _marked(_text_tokens(_escape(panel.alt)), deleted=False, float_mode=True)
+                for panel in block.subfigures
+            ]
+            return _render_figure(
+                ctx, block, deleted=False, caption=caption, panel_captions=panel_captions
+            )
+        case ast.MarkdownBlock(children=children) if children:
+            return _render_markdown(ctx, block, deleted=False, inserted=True)
     return f"\\DIFaddbegin\n{_render_block(ctx, block)}\n\\DIFaddend"
 
 
@@ -867,7 +959,16 @@ def _render_marked_pair(old: _Ctx, old_block: ast.Block, ctx: _Ctx, block: ast.B
                 _render_inlines(ctx, block.caption.inlines),
                 float_mode=True,
             )
-            return _render_figure(ctx, block, deleted=False, caption=caption)
+            panel_captions = [
+                _diff_tokens(
+                    _text_tokens(_escape(before.alt)), _text_tokens(_escape(after.alt)),
+                    float_mode=True,
+                )
+                for before, after in zip(old_block.subfigures, block.subfigures)
+            ]
+            return _render_figure(
+                ctx, block, deleted=False, caption=caption, panel_captions=panel_captions
+            )
         case ast.TableBlock():
             return _render_marked_table(old, old_block, ctx, block)
         case _:
@@ -881,35 +982,27 @@ def _render_marked_pair(old: _Ctx, old_block: ast.Block, ctx: _Ctx, block: ast.B
 def _render_marked_list(
     old: _Ctx, old_block: ast.ListBlock, ctx: _Ctx, block: ast.ListBlock
 ) -> str:
-    if old_block.ordered != block.ordered:
+    old_parts, _, old_starts = _list_parts(old, old_block)
+    new_parts, _, new_starts = _list_parts(ctx, block)
+    if not old_starts or not new_starts or old_parts[:old_starts[0]] != new_parts[:new_starts[0]]:
         return _render_replacement(old, old_block, ctx, block)
-    old_items = _item_tokens(old, old_block)
-    new_items = _item_tokens(ctx, block)
-    old_texts = [_join(tokens) for tokens in old_items]
-    new_texts = [_join(tokens) for tokens in new_items]
-    rendered: list[str] = []
-    for op, i, j, k, last in SequenceMatcher(
-        None, old_texts, new_texts, autojunk=False
-    ).get_opcodes():
+    # The final part closes the outer environment. Nested lists and code stay with their item.
+    old_items = [old_parts[a:b] for a, b in zip(old_starts, [*old_starts[1:], len(old_parts) - 1])]
+    new_items = [new_parts[a:b] for a, b in zip(new_starts, [*new_starts[1:], len(new_parts) - 1])]
+    rendered = [_render_list_parts(new_parts[:new_starts[0]])]
+    old_keys = [_render_list_parts(item) for item in old_items]
+    new_keys = [_render_list_parts(item) for item in new_items]
+    for op, i, j, k, last in SequenceMatcher(None, old_keys, new_keys, autojunk=False).get_opcodes():
         if op == "equal":
-            for index in range(j - i):
-                content = _diff_tokens(
-                    old_items[i + index], new_items[k + index], float_mode=False
-                )
-                rendered.append(f"\\item {content}")
-            continue
+            rendered.extend(new_keys[k:last])
         if op in {"delete", "replace"}:
-            rendered.extend(
-                f"\\item {_diff_tokens(tokens, (), float_mode=False)}"
-                for tokens in old_items[i:j]
-            )
+            rendered.extend(_render_list_parts(item, deleted=True) for item in old_items[i:j])
         if op in {"insert", "replace"}:
-            rendered.extend(
-                f"\\item {_diff_tokens((), tokens, float_mode=False)}"
-                for tokens in new_items[k:last]
-            )
-    environment = "enumerate" if block.ordered else "itemize"
-    content = f"\\begin{{{environment}}}\n" + "\n".join(rendered) + f"\n\\end{{{environment}}}"
+            rendered.extend(_render_list_parts(item, inserted=True) for item in new_items[k:last])
+    closing = new_parts[-1]
+    assert isinstance(closing, str)
+    rendered.append(closing)
+    content = "\n".join(rendered)
     start, end = _line_marks(ctx, block.block_id)
     return f"{start}{_block_label(ctx, block.block_id)}{content}{end}"
 
@@ -956,20 +1049,10 @@ def _render_marked_table(
 
 def _cited_keys(numbered: NumberedWorkspace, name: str, workspace: Workspace) -> tuple[str, ...]:
     kind = workspace.deliverables[name].kind
-    merged = workspace.style.bibliography_placement == "merged-in-main"
-    if merged and kind == "supplementary":
-        return ()
-    if merged and kind == "manuscript":
-        sources = {
-            deliverable
-            for deliverable, entry in workspace.deliverables.items()
-            if entry.kind != "response_letter"
-        }
-        return tuple(
-            key
-            for key, reference in numbered.references.items()
-            if any(source in reference.deliverable_counts for source in sources)
-        )
+    if workspace.style.bibliography_placement == "merged-in-main":
+        if kind != "manuscript":
+            return ()
+        return tuple(key for key, reference in numbered.references.items() if reference.cited)
     return tuple(
         key
         for key, reference in numbered.references.items()
@@ -981,18 +1064,22 @@ def _bib_label_text(reference: NumberedReference) -> str:
     return f"{reference.short_label} ({reference.year})"
 
 
+def _bib_label(numbered: NumberedWorkspace, reference: NumberedReference) -> str:
+    if numbered.citation_style == "numeric":
+        return f"[{reference.number}]"
+    return f"[{{{_escape(_bib_label_text(reference))}}}]"
+
+
 def _bib_item(numbered: NumberedWorkspace, key: str) -> str:
     reference = numbered.references[key]
-    label = ""
-    if numbered.citation_style == "author-year":
-        label = f"[{{{_escape(_bib_label_text(reference))}}}]"
+    label = _bib_label(numbered, reference)
     text = _escape(reference.formatted_text)
     return f"\\bibitem{label}{{{key}}}\\label{{{_BIB_LABEL_PREFIX}{key}}} {text}"
 
 
 def _bib_widest(numbered: NumberedWorkspace, keys: Sequence[str]) -> str:
     if numbered.citation_style == "numeric":
-        return str(max(len(keys), 1))
+        return str(max((numbered.references[key].number or 1 for key in keys), default=1))
     if not keys:
         return "9"
     return max(_bib_label_text(numbered.references[key]) for key in keys)
@@ -1009,7 +1096,7 @@ def _bib_item_marked(
         )
         label = f"[{{{marked}}}]"
     else:
-        label = ""
+        label = _bib_label(numbered, reference)
     text = _diff_tokens(
         _text_tokens(_escape(previous.formatted_text)),
         _text_tokens(_escape(reference.formatted_text)),
@@ -1018,21 +1105,17 @@ def _bib_item_marked(
     return f"\\bibitem{label}{{{key}}}\\label{{{_BIB_LABEL_PREFIX}{key}}} {text}"
 
 
-def _bib_item_deleted(numbered: NumberedWorkspace, key: str) -> str:
+def _bib_item_deleted(numbered: NumberedWorkspace, key: str, alias: str) -> str:
     reference = numbered.references[key]
-    label = ""
-    if numbered.citation_style == "author-year":
-        label = f"[{{{_escape(_bib_label_text(reference))}}}]"
+    label = _bib_label(numbered, reference)
     text = _escape(reference.formatted_text)
     # Deleted entries carry no \label: the live entry owns the anchor.
-    return f"\\DIFdelbegin \\bibitem{label}{{{key}}} \\DIFdel{{{text}}}\\DIFdelend"
+    return f"\\DIFdelbegin \\bibitem{label}{{{alias}}} \\DIFdel{{{text}}}\\DIFdelend"
 
 
 def _bib_item_inserted(numbered: NumberedWorkspace, key: str) -> str:
     reference = numbered.references[key]
-    label = ""
-    if numbered.citation_style == "author-year":
-        label = f"[{{{_escape(_bib_label_text(reference))}}}]"
+    label = _bib_label(numbered, reference)
     text = _escape(reference.formatted_text)
     return (
         f"\\DIFaddbegin \\bibitem{label}{{{key}}}\\label{{{_BIB_LABEL_PREFIX}{key}}} "
@@ -1053,6 +1136,7 @@ def _bibliography(
     if old is None:
         entries = [_bib_item(ctx.numbered, key) for key in keys]
     else:
+        occupied = set(keys)
         for op, i, j, k, last in SequenceMatcher(
             None, list(old_keys), list(keys), autojunk=False
         ).get_opcodes():
@@ -1068,19 +1152,20 @@ def _bibliography(
                         )
                     )
             if op in {"delete", "replace"}:
-                entries.extend(
-                    _bib_item_deleted(old.numbered, key) for key in old_keys[i:j]
-                )
+                for key in old_keys[i:j]:
+                    alias = f"omm-del-{key}"
+                    while alias in occupied:
+                        alias = f"omm-del-{alias}"
+                    occupied.add(alias)
+                    entries.append(_bib_item_deleted(old.numbered, key, alias))
             if op in {"insert", "replace"}:
                 entries.extend(_bib_item_inserted(ctx.numbered, key) for key in keys[k:last])
-    counter = ""
-    if ctx.numbered.citation_style == "numeric" and keys:
-        numbers = [ctx.numbered.references[key].number for key in keys]
-        first = min(number for number in numbers if number is not None)
-        counter = f"\\setcounter{{enumiv}}{{{first - 1}}}\n"
     widest = _bib_widest(ctx.numbered, keys)
+    if old_keys and old is not None:
+        old_widest = _bib_widest(old.numbered, old_keys)
+        widest = max((widest, old_widest), key=len)
     body = "\n".join(entries)
-    return f"{counter}\\begin{{thebibliography}}{{{widest}}}\n{body}\n\\end{{thebibliography}}"
+    return f"\\begin{{thebibliography}}{{{_escape(widest)}}}\n{body}\n\\end{{thebibliography}}"
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1208,18 @@ def _preamble(kind: DeliverableKind, style: Style, *, marked: bool) -> str:
                 "\\renewcommand{\\theequation}{S\\arabic{equation}}",
             ]
         )
-    lines.append("\\setcounter{secnumdepth}{5}")
+    lines.extend((
+        "\\makeatletter",
+        "\\newcounter{subsubparagraph}[subparagraph]",
+        "\\renewcommand{\\thesubsubparagraph}{\\thesubparagraph.\\arabic{subsubparagraph}}",
+        "\\newcommand{\\toclevel@subsubparagraph}{6}",
+        (
+            "\\newcommand{\\subsubparagraph}{\\@startsection{subsubparagraph}{6}{\\parindent}"
+            "{3.25ex plus 1ex minus .2ex}{-1em}{\\normalfont\\normalsize\\bfseries}}"
+        ),
+        "\\makeatother",
+        "\\setcounter{secnumdepth}{6}",
+    ))
     return "\n".join(lines)
 
 
@@ -1180,18 +1276,24 @@ def _document(
     return "\n".join(lines) + "\n"
 
 
-def _figure_assets(snapshot: RevisionSnapshot, sources: Sequence[str]) -> set[str]:
+def _referenced_assets(snapshot: RevisionSnapshot, sources: Sequence[str]) -> set[str]:
     assets = set()
     for source in sources:
         for block in ast.walk_blocks(snapshot.documents[source].blocks):
             if isinstance(block, ast.Subfigure):
                 assets.add(block.asset_path)
+            inlines = block.comment.inlines if isinstance(block, ast.ReviewItem) else block.inlines
+            assets.update(
+                node.destination for node in ast.walk_inlines(inlines)
+                if isinstance(node, ast.Image) and node.destination in snapshot.assets
+            )
     return assets
 
 
 def _asset_plan(
     snapshot: RevisionSnapshot,
-    sources: Sequence[str],
+    new_assets: set[str],
+    global_new_assets: set[str],
     milestone: RevisionSnapshot | None,
     old_sources: Sequence[str] | None,
 ) -> tuple[dict[str, bytes], dict[str, str]]:
@@ -1203,13 +1305,12 @@ def _asset_plan(
     """
     writes: dict[str, bytes] = {}
     alias: dict[str, str] = {}
-    new_assets = _figure_assets(snapshot, sources)
     if milestone is None or old_sources is None:
         old_assets: set[str] = set()
     else:
-        old_assets = _figure_assets(milestone, old_sources)
+        old_assets = _referenced_assets(milestone, old_sources)
     for path in sorted(old_assets | new_assets):
-        if path in new_assets:
+        if path in global_new_assets:
             data = snapshot.assets[path]
         else:
             # The figure is gone in the target revision; keep the milestone bytes.
@@ -1223,7 +1324,9 @@ def _asset_plan(
             continue
         digest = hashlib.sha256(previous).hexdigest()[:8]
         parent, _, name = path.rpartition("/")
-        archived = f"{parent}/.omm_old_{digest}_{name}" if parent else f".omm_old_{digest}_{name}"
+        archived = (Path(parent) / f".omm_old_{digest}_{name}").as_posix()
+        while archived in snapshot.assets or archived in milestone.assets:
+            archived = (Path(parent) / f".omm_old_{Path(archived).name}").as_posix()
         alias[path] = archived
         writes[path] = data
         writes[archived] = previous
@@ -1258,6 +1361,7 @@ def compile_latex_workspace(
     loc_labels: Mapping[tuple[str, str | None], str] | None = None,
     deliverables: Collection[str] | None = None,
     pdf_deliverables: Collection[str] = (),
+    shared_asset_deliverables: Collection[str] = (),
 ) -> dict[str, CompiledLatexDeliverable]:
     """Compile deliverables of ``snapshot`` into deterministic ``.tex`` files."""
     _validate_math(snapshot)
@@ -1276,6 +1380,11 @@ def compile_latex_workspace(
             if name not in workspace.deliverables:
                 raise KeyError(name)
     names = [name for name in workspace.deliverables if requested is None or name in requested]
+    referenced_assets = {
+        name: _referenced_assets(snapshot, workspace.deliverables[name].sources)
+        for name in dict.fromkeys((*names, *shared_asset_deliverables))
+    }
+    global_new_assets = set().union(*referenced_assets.values())
     results: dict[str, CompiledLatexDeliverable] = {}
     for name in names:
         deliverable = workspace.deliverables[name]
@@ -1290,7 +1399,8 @@ def compile_latex_workspace(
             old_deliverable = milestone.workspace.deliverables[name]
         writes, alias = _asset_plan(
             snapshot,
-            deliverable.sources,
+            referenced_assets[name],
+            global_new_assets,
             milestone if old_deliverable is not None else None,
             old_deliverable.sources if old_deliverable is not None else None,
         )
@@ -1310,7 +1420,6 @@ def compile_latex_workspace(
         parts = []
         for source in deliverable.sources:
             document = snapshot.documents[source]
-            ctx.document = document
             for block in document.blocks:
                 try:
                     rendered = _render_block(ctx, block)
@@ -1341,11 +1450,15 @@ def compile_latex_workspace(
                 lineno=False,
                 record=False,
                 loc_labels={},
-                local_citations=frozenset(old_keys),
+                local_blocks=(
+                    _labeled_blocks(milestone, old_deliverable.sources)
+                    if old_deliverable.kind != "response_letter" else frozenset()
+                ),
+                local_citations=frozenset(old_keys).intersection(keys),
                 asset_alias=alias,
             )
             # The Marked pass must not append to the Clean block records.
-            marked_ctx = replace(ctx, record=False, pdf_layout=False, records=[])
+            marked_ctx = replace(ctx, record=False, pdf_layout=False, heading_level=0, records=[])
             marked_body = _marked_body(old_ctx, marked_ctx)
             marked_bibliography = _bibliography(marked_ctx, keys, old=old_ctx, old_keys=old_keys)
             marked_path = out_dir / f"{name}.marked.tex"
@@ -1398,18 +1511,14 @@ def _marked_body(old: _Ctx, ctx: _Ctx) -> str:
     ).get_opcodes():
         if op == "equal":
             for index in range(j - i):
-                old_block, old_source = old_sequence[i + index]
-                new_block, new_source = new_sequence[k + index]
-                old.document = old.snapshot.documents[old_source]
-                ctx.document = ctx.snapshot.documents[new_source]
+                old_block, _ = old_sequence[i + index]
+                new_block, _ = new_sequence[k + index]
                 parts.append(_render_marked_pair(old, old_block, ctx, new_block))
             continue
         if op in {"delete", "replace"}:
-            for block, source in old_sequence[i:j]:
-                old.document = old.snapshot.documents[source]
+            for block, _ in old_sequence[i:j]:
                 parts.append(_render_deleted(old, block))
         if op in {"insert", "replace"}:
-            for block, source in new_sequence[k:last]:
-                ctx.document = ctx.snapshot.documents[source]
+            for block, _ in new_sequence[k:last]:
                 parts.append(_render_inserted(ctx, block))
     return "\n\n".join(parts)

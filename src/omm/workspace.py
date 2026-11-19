@@ -10,6 +10,7 @@ import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
+from os.path import abspath
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import NamedTemporaryFile
 from typing import Literal, cast
@@ -23,6 +24,7 @@ DeliverableKind = Literal["manuscript", "supplementary", "response_letter"]
 MANIFEST = "manuscript.toml"
 ANNOTATIONS = Path(".omm", "annotations.json")
 DEFAULT_TITLE = "Untitled Manuscript"
+_WINDOWS_PATHS = os.name == "nt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +87,8 @@ def read_text(path: Path) -> str:
 
 
 def _replace_file(temporary: Path, path: Path) -> None:
+    temporary = fs_path(temporary)
+    path = fs_path(path)
     if os.name != "nt":
         os.replace(temporary, path)
         return
@@ -104,16 +108,17 @@ def _replace_file(temporary: Path, path: Path) -> None:
 def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
     temporary = None
     try:
+        destination = fs_path(path)
         with NamedTemporaryFile(
-            mode="w", dir=path.parent, encoding="utf-8", newline="\n", delete=False
+            mode="w", dir=destination.parent, encoding="utf-8", newline="\n", delete=False
         ) as stream:
-            temporary = Path(stream.name)
+            temporary = fs_path(Path(stream.name))
             stream.write(text)
             stream.flush()
         if mode is not None:
             temporary.chmod(mode)
-        elif path.exists():
-            temporary.chmod(path.stat().st_mode & 0o777)
+        elif destination.exists():
+            temporary.chmod(destination.stat().st_mode & 0o777)
         _replace_file(temporary, path)
         temporary = None
     except OSError as exc:
@@ -157,6 +162,18 @@ def resolve_path(path: Path) -> Path:
     if os.name == "nt":
         return Path(_strip_windows_verbatim_prefix(str(resolved)))
     return resolved
+
+
+def fs_path(path: Path) -> Path:
+    """Use Windows extended-length paths for I/O without following links."""
+    if not _WINDOWS_PATHS:
+        return path
+    absolute = abspath(path)
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
 
 
 def workspace_path(root: Path, relative: str, path: Path | None = None) -> Path:
@@ -264,9 +281,21 @@ def load_workspace(root: Path) -> Workspace:
     if not isinstance(raw_deliverables, dict) or not raw_deliverables:
         raise OmmError("ERR_MANIFEST_INVALID", path=path, field="deliverables")
     deliverables = {}
+    names = set()
     for name, value in raw_deliverables.items():
         field = f"deliverables.{name}"
         string(name, "deliverables")
+        folded = name.casefold()
+        device = folded.split(".", 1)[0].rstrip(" ")
+        if (
+            folded in names
+            or any(part in name for part in ("/", "\\", "..", ":"))
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in name)
+            or name.endswith((".", " "))
+            or re.fullmatch(r"con|prn|aux|nul|(?:com|lpt)[1-9]", device)
+        ):
+            raise OmmError("ERR_MANIFEST_INVALID", path=path, field=field)
+        names.add(folded)
         entry = table(value, field, {"kind", "sources"})
         kind = string(
             entry.get("kind"), f"{field}.kind", ("manuscript", "supplementary", "response_letter")

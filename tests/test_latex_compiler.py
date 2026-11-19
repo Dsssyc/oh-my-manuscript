@@ -198,7 +198,7 @@ def test_clean_skeleton_labels_and_records(repo: Path, tmp_path: Path) -> None:
         "\\hypersetup{colorlinks=true, linkcolor=OmmLinkColor, "
         "citecolor=OmmLinkColor, urlcolor=OmmLinkColor}" in document
     )
-    assert "\\setcounter{secnumdepth}{5}" in document
+    assert "\\setcounter{secnumdepth}{6}" in document
     assert "\\linenumbers" in document
     assert document.rstrip().endswith("\\end{document}")
 
@@ -209,10 +209,10 @@ def test_clean_skeleton_labels_and_records(repo: Path, tmp_path: Path) -> None:
     assert "\\linelabel{omm:ls:sec-intro}\\section{Intro}\\label{omm:sec-intro}" in document
     assert "\\label{omm:sec-intro}\\linelabel{omm:le:sec-intro}" in document
     assert "\\linelabel{omm:ls:p-body}\\label{omm:p-body}Body text." in document
-    assert "\\item one\n\\item two" in document
+    assert "\\item\none\n\\par\n\\item\ntwo" in document
     assert "\\begin{itemize}" in document
     assert "\\linelabel{omm:ls:eq-main}\\begin{equation}\\label{omm:eq-main}" in document
-    assert " \\end{equation}\\linelabel{omm:le:eq-main}" in document
+    assert "\n\\end{equation}\\linelabel{omm:le:eq-main}" in document
     assert "\\begin{figure}[htbp]" in document
     assert "\\caption{Site map.}\\label{omm:fig-site}" in document
     assert "\\caption{Metrics.}\\label{omm:tbl-metrics}" in document
@@ -506,10 +506,9 @@ def test_numeric_style_bibliography(repo: Path, tmp_path: Path) -> None:
     assert "\\definecolor{OmmLinkColor}{HTML}{000000}" in document
     assert "\\hyperref[omm:bib:kirchner2009]{1}" in document
     assert "\\hyperref[omm:bib:beven2020]{2}" in document
-    assert "\\setcounter{enumiv}{0}" in document
     assert "\\begin{thebibliography}{2}" in document
     assert (
-        "\\bibitem{kirchner2009}\\label{omm:bib:kirchner2009} "
+        "\\bibitem[1]{kirchner2009}\\label{omm:bib:kirchner2009} "
         "Kirchner, J. W. (2009). Catchments." in document
     )
     assert "[{Kirchner" not in document
@@ -524,13 +523,15 @@ def test_bibliography_placement_merged_in_main(repo: Path, tmp_path: Path) -> No
             {
                 "manuscript": ("manuscript", [INTRO]),
                 "supplementary": ("supplementary", [APPENDIX]),
+                "response": ("response_letter", [REBUTTAL]),
             },
             style=style,
         ),
         {
-            "references.bib": BIB,
+            "references.bib": BIB + "@article{reply2022, author={A. Smith}, year={2022}, title={Reply}}",
             INTRO: "Main cites [@beven2020]. {#p-x}\n",
             APPENDIX: "# Appendix {#sec-app}\n\nSupplement cites [@kirchner2009]. {#p-app}\n",
+            REBUTTAL: "Reply cites [@reply2022]. {#p-reply}\n",
         },
         {},
     )
@@ -540,6 +541,10 @@ def test_bibliography_placement_merged_in_main(repo: Path, tmp_path: Path) -> No
     supplement = read(tmp_path, revision, "supplementary.clean.tex")
     assert "kirchner2009" in main
     assert "beven2020" in main
+    assert "omm:bib:reply2022" in main
+    response = read(tmp_path, revision, "response.clean.tex")
+    assert "\\begin{thebibliography}" not in response
+    assert "\\textcolor{OmmLinkColor}{Smith, 2022}" in response
     assert "\\begin{thebibliography}" not in supplement
     assert "\\bibitem" not in supplement
     # The merged entry has no anchor in the supplement: colored text, no link.
@@ -558,8 +563,8 @@ def test_display_math_numbered_and_unnumbered(repo: Path, tmp_path: Path) -> Non
     revision = publish(repo)
     compile_out(repo, tmp_path, revision)
     document = read(tmp_path, revision, "manuscript.clean.tex")
-    assert "\\begin{equation}\\label{omm:eq-a} u = f(x) \\end{equation}" in document
-    assert "\\[w = 1\\]" in document
+    assert "\\begin{equation}\\label{omm:eq-a} u = f(x)\n\\end{equation}" in document
+    assert "\\[w = 1\n\\]" in document
     assert document.count("\\begin{equation}") == 1
 
 
@@ -700,6 +705,175 @@ def test_marked_word_diff_and_macro_balance(repo: Path, tmp_path: Path) -> None:
     assert brace_balance(document) == 0
 
 
+def test_marked_word_boundaries_and_balanced_format_changes(repo, tmp_path):
+    old, new = two_revisions(
+        repo,
+        {INTRO: "two {#p-word}\n\n**bold** and **same command**. {#p-format}\n"},
+        {INTRO: "one two {#p-word}\n\n*bold* and **same style**. {#p-format}\n"},
+    )
+    artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
+    marked = artifact.marked_path.read_text(encoding="utf-8")
+    assert r"\DIFaddend{}two" in marked
+    assert r"\DIFdel{\mbox{\textbf{bold}}}" in marked
+    assert r"\DIFadd{\mbox{\emph{bold}}}" in marked
+    assert r"\textbf{same \DIFdelbegin \DIFdel{command}" in marked
+    assert brace_balance(marked) == 0
+
+
+def test_marked_inserted_content_and_changed_panel_caption(repo, tmp_path):
+    figure = (
+        ":::{figure} {#fig-main}\n![Old panel](a.png){#fig-a}\n"
+        "![Same panel](b.png){#fig-b}\n\nMain caption.\n:::\n"
+    )
+    old_body = (
+        "# Stable {#sec-stable}\n\nSee [#sec-stable]. {#p-ref}\n\n"
+        "- Stable item. {#li-stable}\n\n" + figure
+    )
+    new_body = old_body.replace("Old panel", "New panel").replace(
+        "- Stable item. {#li-stable}", "- Stable item.\n- Added to existing list. {#li-stable}"
+    ) + (
+        "\n## New heading {#sec-new}\n\nNew paragraph. {#p-new}\n\n"
+        "- New list item. {#li-new}\n\n"
+        ":::{figure} {#fig-inserted}\n![Single](a.png){#fig-single}\n\nNew figure.\n:::\n\n"
+        ":::{table} {#tbl-new}\nNew table.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n:::\n"
+    )
+    stage(
+        repo, manifest({"manuscript": ("manuscript", [INTRO])}),
+        {"references.bib": "", INTRO: old_body}, {"a.png": b"a", "b.png": b"b"},
+    )
+    first = publish(repo)
+    write(repo, INTRO, new_body)
+    second = publish(repo)
+    artifact = compile_marked(repo, tmp_path, first, second)["manuscript"]
+    marked = artifact.marked_path.read_text(encoding="utf-8")
+    assert r"\DIFaddFL{New heading}" in marked
+    assert r"\DIFadd{New paragraph.}" in marked
+    assert r"\DIFadd{New list item.}" in marked
+    assert r"\DIFadd{Added to existing list.}" in marked
+    assert "Stable item." not in "".join(dif_regions(marked, deleted=False))
+    assert r"\DIFaddFL{New figure.}" in marked
+    assert r"\DIFaddFL{New table.}" in marked
+    assert r"\DIFdelFL{Old}" in marked and r"\DIFaddFL{New}" in marked
+    assert r"\caption{Same panel}\label{omm:fig-b}" in marked
+    assert r"See \hyperref[omm:sec-stable]{Section~1}." in marked
+    assert r"\label{omm:fig-inserted}\label{omm:fig-single}" in marked
+    assert brace_balance(marked) == 0
+
+
+def test_shared_new_asset_wins_over_deleted_figure_and_inline_images_are_exported(repo, tmp_path):
+    def figure(name):
+        return f":::{{figure}} {{#fig-{name}}}\n![Map](figures/map.png)\n\nMap.\n:::\n"
+
+    stage(
+        repo, manifest({"main": ("manuscript", [INTRO]), "appendix": ("supplementary", [APPENDIX])}),
+        {"references.bib": "", INTRO: figure("main"), APPENDIX: figure("appendix")},
+        {"figures/map.png": b"milestone"},
+    )
+    old = snapshot_at(repo, publish(repo))
+    write(repo, INTRO, "Inline ![Map](figures/map.png). {#p-image}\n")
+    write(repo, APPENDIX, "Removed map. {#p-no-map}\n")
+    new = snapshot_at(repo, publish(repo))
+    # Model an inline asset already present in the revision snapshot.
+    new = replace(new, assets={"figures/map.png": b"current"})
+    out_dir = tmp_path / "build"
+    artifacts = compile_latex_workspace(new, out_dir, milestone=old)
+    path = out_dir / "figures/map.png"
+    assert path in artifacts["main"].asset_paths
+    assert path.read_bytes() == b"current"
+    assert r"\includegraphics{figures/map.png}" in artifacts["main"].clean_path.read_text()
+    [archived] = artifacts["appendix"].clean_path.parent.glob("figures/.omm_old_*_map.png")
+    assert archived.read_bytes() == b"milestone"
+    assert archived in artifacts["appendix"].asset_paths
+    marked = artifacts["appendix"].marked_path.read_text(encoding="utf-8")
+    assert f"figures/{archived.name}" in marked
+
+
+def test_clean_deep_headings_quoted_lists_and_literal_closers(repo, tmp_path):
+    source = (
+        "###### Deep first {#sec-deep}\n\nSee [#sec-deep]. {#p-ref}\n\n"
+        "> 3. ## Item title\n>    - Nested **word**\n>    - Next\n"
+        "> 4. Text before code\n>    ~~~text\n>    Sample code\n>    ~~~\n"
+        "> {#li-quote}\n\n"
+        "$$\nx = 2 % numbered\n$$ {#eq-comment}\n\n"
+        "$$\ny = 3 % unnumbered\n$$ {#eq-comment-free unnumbered}\n\n"
+        "~~~text\n  \\end{verbatim}\nreset\n~~~\n"
+    )
+    stage(
+        repo, manifest({"manuscript": ("manuscript", [INTRO])}),
+        {"references.bib": "", INTRO: source}, {},
+    )
+    artifact = compile_out(repo, tmp_path, publish(repo))["manuscript"]
+    rendered = artifact.clean_path.read_text(encoding="utf-8")
+    assert rendered.count(r"\begin{quote}") == 1
+    assert r"\setcounter{section}{1}" in rendered
+    assert r"\setcounter{subsection}{1}" in rendered
+    assert r"\setcounter{subparagraph}{1}" in rendered
+    assert r"\subsubparagraph{Deep first}" in rendered
+    assert r"\hyperref[omm:sec-deep]{Section~1.1.1.1.1.1}" in rendered
+    assert r"\setcounter{enumi}{2}" in rendered
+    assert r"\textbf{Item title}" in rendered
+    assert r"Nested \textbf{word}" in rendered
+    assert "\\begin{verbatim}\nSample code\n\\end{verbatim}" in rendered
+    assert "% numbered\n\\end{equation}" in rendered
+    assert "% unnumbered\n\\]" in rendered
+    assert r"\texttt{\strut \ \ \textbackslash{}end\{verbatim\}}" in rendered
+    assert r"\texttt{\strut reset}" in rendered
+
+
+def test_sparse_numeric_bibliography_uses_global_labels(repo, tmp_path):
+    stage(
+        repo,
+        manifest(
+            {"main": ("manuscript", [INTRO]), "appendix": ("supplementary", [APPENDIX])},
+            style='[style]\ncitation_style = "numeric"\n',
+        ),
+        {
+            "references.bib": BIB + "@article{k3, author={A. Smith}, year={2022}, title={Extra}}",
+            INTRO: "Earlier [@beven2020; @kirchner2009]. {#p-main}\n",
+            APPENDIX: "Cites [@beven2020; @k3]. {#p-appendix}\n",
+        },
+        {},
+    )
+    artifact = compile_out(repo, tmp_path, publish(repo))["appendix"]
+    rendered = artifact.clean_path.read_text(encoding="utf-8")
+    assert r"\begin{thebibliography}{3}" in rendered
+    assert r"\bibitem[1]{beven2020}" in rendered
+    assert r"\bibitem[3]{k3}" in rendered
+
+
+def test_heading_counter_resets_when_a_level_is_skipped_after_a_new_section(repo, tmp_path):
+    source = (
+        "# One {#sec-one}\n\n## First {#sec-first}\n\n### Previous {#sec-previous}\n\n"
+        "# Two {#sec-two}\n\n### Skipped subsection {#sec-skipped}\n"
+    )
+    stage(
+        repo, manifest({"manuscript": ("manuscript", [INTRO])}),
+        {"references.bib": "", INTRO: source}, {},
+    )
+    artifact = compile_out(
+        repo, tmp_path, publish(repo), pdf_deliverables=["manuscript"]
+    )["manuscript"]
+    assert artifact.blocks[-1].plain_text == "2.1.1 Skipped subsection"
+    rendered = artifact.clean_path.read_text(encoding="utf-8")
+    assert (
+        "\\setcounter{subsection}{1}\n\\setcounter{subsubsection}{0}\n"
+        "\\linelabel{omm:ls:sec-skipped}\\subsubsection{Skipped subsection}"
+    ) in rendered
+
+
+def test_author_year_bibliography_width_escapes_institution_name(repo, tmp_path):
+    stage(
+        repo, manifest({"manuscript": ("manuscript", [INTRO])}),
+        {
+            "references.bib": "@report{agency, author={{Water & Land}}, year={2020}, title={Study}}",
+            INTRO: "See [@agency]. {#p-agency}\n",
+        },
+        {},
+    )
+    artifact = compile_out(repo, tmp_path, publish(repo))["manuscript"]
+    assert r"\begin{thebibliography}{Water \& Land (2020)}" in artifact.clean_path.read_text()
+
+
 def test_marked_renumbering_and_year_disambiguation(repo: Path, tmp_path: Path) -> None:
     stage(
         repo,
@@ -798,7 +972,7 @@ def test_marked_deleted_equation_figure_and_counters(repo: Path, tmp_path: Path)
     deleted = " ".join(dif_regions(document, deleted=True))
     # Deleted numbered equations are struck in star form and never advance the
     # equation counter or emit a duplicate label.
-    assert "\\[u = f(x)\\]" in deleted
+    assert "\\[u = f(x)\n\\]" in deleted
     assert "\\caption*{Chart.}" in document
     assert "omm:eq-a" not in document
     assert "omm:fig-f" not in document
@@ -853,12 +1027,11 @@ def test_marked_heterogeneous_table_whole_replacement(repo: Path, tmp_path: Path
     results = compile_marked(repo, tmp_path, milestone.revision, snapshot.revision)
     document = results["manuscript"].marked_path.read_text(encoding="utf-8")
     deleted = dif_regions(document, deleted=True)
-    inserted = dif_regions(document, deleted=False)
     assert any("1 & 2" in region and "1 & 2 & 3" not in region for region in deleted)
-    assert any("1 & 2 & 3" in region for region in inserted)
+    assert "1 & 2 & 3" in document
     assert document.count("\\begin{tabular}") == 2
     assert document.count("\\caption*{Caption.}") == 1
-    assert document.count("\\caption{Caption.}") == 1
+    assert "\\DIFaddFL{Caption.}" in document
     assert document.count("\\label{omm:tbl-metrics}") == 1
     assert brace_balance(document) == 0
 
@@ -883,14 +1056,20 @@ def test_marked_bibliography_lcs_entries(repo: Path, tmp_path: Path) -> None:
     second = publish(repo)
     results = compile_marked(repo, tmp_path, first, second)
     document = results["manuscript"].marked_path.read_text(encoding="utf-8")
-    assert document.count("\\DIFdelbegin \\bibitem{") == 2
-    assert document.count("\\DIFaddbegin \\bibitem{") == 2
-    assert "\\DIFaddbegin \\bibitem{k4}" in document
+    assert document.count("\\DIFdelbegin \\bibitem[") == 2
+    assert document.count("\\DIFaddbegin \\bibitem[") == 2
+    assert "\\DIFaddbegin \\bibitem[3]{k4}" in document
     assert document.count("\\label{omm:bib:k4}") == 1
+    assert "\\bibitem[2]{omm-del-k2}" in document
+    assert "\\bibitem[3]{omm-del-k3}" in document
+    assert "\\bibitem[1]{k3}" in document
+    assert r"\hyperref[omm:bib:k2]" not in document
+    assert r"\textcolor{OmmLinkColor}{2}" in document
+    keys = re.findall(r"\\bibitem\[\d+\]\{([^}]+)\}", document)
+    assert len(keys) == len(set(keys)) == 5
     deleted_entries = " ".join(dif_regions(document, deleted=True))
     for key in ("k1", "k2", "k3"):
-        if f"\\bibitem{{{key}}}" in deleted_entries:
-            assert f"\\label{{omm:bib:{key}}}" not in deleted_entries
+        assert f"\\label{{omm:bib:{key}}}" not in deleted_entries
     assert brace_balance(document) == 0
 
 
@@ -942,10 +1121,10 @@ def test_marked_figure_asset_replacement_archives_old_image(
     assert archived[0].read_bytes() == b"first-bytes"
     assert archived[0].parent == deliverable.clean_path.parent / "figures"
     digest = archived[0].name.split("_")[2]
-    assert f"figures/.omm\\_old\\_{digest}\\_panel.png" in document
+    assert f"figures/.omm_old_{digest}_panel.png" in document
     assert "figures/panel.png" in document
     assert document.count("\\caption*{Panel.}") == 1
-    assert document.count("\\caption{Panel.}") == 1
+    assert "\\DIFaddFL{Panel.}" in document
     assert document.count("\\label{omm:fig-f}") == 1
     # The clean document never references the archived old image.
     clean = deliverable.clean_path.read_text(encoding="utf-8")
@@ -974,8 +1153,8 @@ def test_marked_display_math_atomic_replacement(repo: Path, tmp_path: Path) -> N
     )
     results = compile_marked(repo, tmp_path, milestone.revision, snapshot.revision)
     document = results["manuscript"].marked_path.read_text(encoding="utf-8")
-    assert "\\[u = f(x)\\]" in document
-    assert "\\begin{equation}\\label{omm:eq-a} u = g(x) \\end{equation}" in document
+    assert "\\[u = f(x)\n\\]" in document
+    assert "\\begin{equation}\\label{omm:eq-a} u = g(x)\n\\end{equation}" in document
     assert document.count("\\begin{equation}") == 1
     assert document.count("\\label{omm:eq-a}") == 1
 
@@ -1164,7 +1343,6 @@ def test_deliverables_subset_validation(repo: Path, tmp_path: Path) -> None:
             f'[deliverables."sub/dir"]\nkind = "supplementary"\nsources = ["{APPENDIX}"]\n'
         ),
     )
-    unsafe = publish(repo)
     with pytest.raises(OmmError, match="^ERR_MANIFEST_INVALID$") as error:
-        compile_latex_workspace(snapshot_at(repo, unsafe), tmp_path / "out-bad")
-    assert error.value.diagnostic.params["field"] == "sub/dir"
+        publish(repo)
+    assert error.value.diagnostic.params["field"] == "deliverables.sub/dir"

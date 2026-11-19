@@ -111,7 +111,7 @@ def _http(state: Path, workspace_id: str):
             assert not thread.is_alive()
 
 
-def _numbered_pdf(path: Path) -> None:
+def _numbered_pdf(path: Path, *, offset: int = 0) -> None:
     """Lay out the revised Clean manuscript as two pages of positioned PDF text."""
     font = DictionaryObject({
         NameObject("/Type"): NameObject("/Font"),
@@ -144,7 +144,8 @@ def _numbered_pdf(path: Path) -> None:
         })
         content = DecodedStreamObject()
         content.set_data("\n".join(
-            f"BT /F1 {size} Tf 1 0 0 1 {x} {y} Tm <{value.encode('ascii').hex()}> Tj ET"
+            f"BT /F1 {size} Tf 1 0 0 1 {x} {y} Tm "
+            f"<{(str(int(value) + offset) if x == 42 else value).encode('ascii').hex()}> Tj ET"
             for x, y, size, value in rows
         ).encode("ascii"))
         page.replace_contents(content)
@@ -277,14 +278,19 @@ See [#sec-reply] for the response. {#p-reply}
         assert not run("check").err
 
     # Compile both formats using the printed line numbers from the matching PDF layout.
-    layout = tmp_path / "numbered.pdf"
-    _numbered_pdf(layout)
-    built = json.loads(run("build", "--layout-pdf", f"manuscript={layout}", "--json").out)
+    word_layout = tmp_path / "word-numbered.pdf"
+    tex_layout = tmp_path / "tex-numbered.pdf"
+    _numbered_pdf(word_layout)
+    _numbered_pdf(tex_layout, offset=100)
+    built = json.loads(run(
+        "build", "--layout-pdf", f"docx:manuscript={word_layout}",
+        "--layout-pdf", f"latex:manuscript={tex_layout}", "--json",
+    ).out)
     assert (built["revision"], built["milestone"]) == (c2, c1)
     assert built["out_dir"] == str(resolve_path(root / ".omm" / "build"))
     assert built["resolved_locations"] == {
         "docx": {"p-sy": "manuscript.clean.docx, p. 2, line 5"},
-        "latex": {"p-sy": "manuscript.clean.tex, p. 2, line 5"},
+        "latex": {"p-sy": "manuscript.clean.tex, p. 2, line 105"},
     }
     word = built["deliverables"]["docx"]
     latex = built["deliverables"]["latex"]
@@ -337,8 +343,29 @@ See [#sec-reply] for the response. {#p-reply}
             assert stack.pop() == (action, floating)
     assert regions and not stack
     assert r"\DIFdelFL{(2020)}" in body and r"\DIFaddFL{(2020a)}" in body
-    assert f"\\DIFdelbegin\n\\[{OLD_EQ}\\]\n\\DIFdelend" in body
-    assert re.search(r"\\DIFaddbegin\n[^\n]+" + re.escape(NEW_EQ) + r".*\n\\DIFaddend", body)
+    assert f"\\DIFdelbegin\n\\[{OLD_EQ}\n\\]\n\\DIFdelend" in body
+    assert re.search(
+        r"\\DIFaddbegin\n[^\n]+" + re.escape(NEW_EQ) + r"\n\\end\{equation\}.*\n\\DIFaddend",
+        body,
+    )
+
+
+def test_build_rejects_workspace_source_directories(workspace, monkeypatch):
+    root, run = workspace
+    monkeypatch.chdir(root)
+    asset = root / "figures" / "map.png"
+    asset.parent.mkdir(exist_ok=True)
+    asset.write_bytes(b"published image")
+    _write(root, INTRO, ":::{figure} {#fig-map}\n![Map](figures/map.png)\n\nA map.\n:::\n")
+    revision = _publish(run)
+    asset.write_bytes(b"working image")
+    for out_dir in (".", str(root.parent), "figures", ".omm"):
+        error = run("build", "--target", "latex", "--revision", revision,
+                    "--out-dir", out_dir, expected=1)
+        assert "ERR_WORKSPACE_PATH_INVALID" in error.err
+    assert asset.read_bytes() == b"working image"
+    run("build", "--target", "latex", "--revision", revision, "--out-dir", ".omm/submission")
+    assert (root / ".omm/submission/figures/map.png").read_bytes() == b"published image"
 
 
 def test_build_selects_latest_ancestral_submission(workspace):

@@ -31,7 +31,7 @@ Use the installed `omm` launcher with `--cwd PATH` on Workspace commands or run 
 | `annotate resolve ID [--after-rev REV] [--json]` | Record a Resolution Snapshot against a published revision. |
 | `annotate reopen ID [--json]` | Reopen an Annotation. |
 | `annotate delete ID [--json]` | Delete an Annotation. JSON includes its `id`. |
-| `build [--target docx\|latex\|all] [--out-dir PATH] [--revision REV] [--milestone REV] [--layout-pdf DELIVERABLE=PATH]… [--json]` | Compile Clean and, when a Submission Milestone applies, Marked deliverables. |
+| `build [--target docx\|latex\|all] [--out-dir PATH] [--revision REV] [--milestone REV] [--layout-pdf [TARGET:]DELIVERABLE=PATH]… [--json]` | Compile Clean and, when a Submission Milestone applies, Marked deliverables. |
 
 Annotation JSON includes `id`, `block_id`, `selector`, `comment`, `base_rev`, `created_at`, `before_block_md`, `resolutions`, and derived `status`. See subcommand help for the revision and selector options.
 
@@ -41,7 +41,9 @@ Annotation JSON includes `id`, `block_id`, `selector`, `comment`, `base_rev`, `c
 
 The default input is `refs/omm/published`. Run `omm sync` before building a changed Workspace, or use `--revision REV` to explicitly build a Git snapshot while editing. `--milestone REV` selects the comparison revision for Marked manuscript and supplementary files. By default, the compiler selects the newest ancestral `v*-submitted` tag strictly before the requested revision. It emits Clean files when there is no eligible tag and requires an explicit milestone when the tags have no unique latest ancestor.
 
-For reply locations, supply a PDF exported from the corresponding Clean deliverable with printed margin line numbers, for example `--layout-pdf manuscript=manuscript-numbered.pdf`. Repeat the option for additional deliverables. For each referenced deliverable without a supplied PDF, the Word target uses headless LibreOffice (`soffice`) and the LaTeX target uses a headless TeX engine's `.aux` labels. Workspaces without location references in compiled content need neither engine.
+For reply locations, supply a PDF exported from the corresponding Clean deliverable with printed margin line numbers. With `--target all`, qualify each PDF with its format, such as `--layout-pdf docx:manuscript=word-numbered.pdf --layout-pdf latex:manuscript=tex-numbered.pdf`. With a single target, the prefix is optional, so `--target docx --layout-pdf manuscript=word-numbered.pdf` also works. For each referenced deliverable without a supplied PDF for its format, the Word target uses headless LibreOffice (`soffice`) and the LaTeX target uses a headless TeX engine's `.aux` labels. Workspaces without location references in compiled content need neither engine.
+
+The default output directory is `.omm/build`. A custom output directory inside the workspace must be a subdirectory of `.omm`. The workspace root and its ancestors are invalid output directories.
 
 `--json` reports the resolved Git IDs (`revision`, `milestone`), the absolute `out_dir`, and the requested `targets`. `deliverables` is keyed by target and deliverable name, with absolute `clean`, optional `marked` (or `null`), and `assets` paths. `resolved_locations` is keyed by target and then by block ID or `start..end` range.
 

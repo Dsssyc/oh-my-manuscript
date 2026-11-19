@@ -43,12 +43,28 @@ def _pdf(
     shared_text_object: bool = False,
 ) -> Path:
     writer = PdfWriter()
+    extra_glyphs = {
+        char: index for index, char in enumerate("‐√∛∜∑∏∫∬∭∮⋃⋂", 1)
+    }
+    cmap = DecodedStreamObject()
+    mappings = "\n".join(f"<{code:02x}> <{ord(char):04x}>" for char, code in extra_glyphs.items())
+    cmap.set_data(f"""
+begincmap
+1 begincodespacerange
+<00> <ff>
+endcodespacerange
+{len(extra_glyphs)} beginbfchar
+{mappings}
+endbfchar
+endcmap
+""".encode("ascii"))
     font = DictionaryObject(
         {
             NameObject("/Type"): NameObject("/Font"),
             NameObject("/Subtype"): NameObject("/Type1"),
             NameObject("/BaseFont"): NameObject("/Helvetica"),
             NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+            NameObject("/ToUnicode"): writer._add_object(cmap),
         }
     )
     for fragments in pages:
@@ -62,7 +78,10 @@ def _pdf(
         for x, y, value, *sizes in fragments:
             size = sizes[0] if sizes else 10
             # A translated graphics state exercises the composition of the two matrices.
-            encoded = value.encode("cp1252").hex()
+            encoded = b"".join(
+                bytes([extra_glyphs[char]]) if char in extra_glyphs else char.encode("cp1252")
+                for char in value
+            ).hex()
             text = f"1 0 0 1 {x - 3:g} {y - 4:g} Tm <{encoded}> Tj"
             if shared_text_object:
                 if active_size != size:
@@ -194,6 +213,24 @@ def test_pdf_named_destination_disambiguates_matching_text(tmp_path):
     assert resolve_blocks_from_pdf(
         path, [_record("p-repeated", "Repeated text.")], deliverable="manuscript"
     ) == {"p-repeated": LineSpan(1, 106, 1, 106, ((1, 106, 106),))}
+
+
+@pytest.mark.parametrize("hyphen", ["-", "‐"])
+def test_pdf_prefers_numbered_heading_and_matches_discretionary_hyphens(tmp_path, hyphen):
+    pdf = _pdf(tmp_path / "layout.pdf", [[
+        (150, 750, "Catchment study", 18),
+        (42, 700, "12"), (75, 700, "Catchment study"),
+        (42, 680, "13"), (75, 680, f"Regional hydro{hyphen}"),
+        (42, 660, "14"), (75, 660, "logical and long-term trends."),
+    ]])
+    records = [
+        _record("sec-name", "Catchment study", "heading"),
+        _record("p-trends", "Regional hydrological and long-term trends."),
+    ]
+    assert resolve_blocks_from_pdf(pdf, records, deliverable="main") == {
+        "sec-name": LineSpan(1, 12, 1, 12, ((1, 12, 12),)),
+        "p-trends": LineSpan(1, 13, 1, 14, ((1, 13, 14),)),
+    }
 
 
 def test_pdf_validates_word_boundaries_and_document_order(tmp_path):
@@ -414,6 +451,10 @@ def test_pdf_validates_numbered_cases_on_multiple_baselines(
             r"\begin{aligned} x &= 1 \\ y &= 2 \end{aligned}",
             [(220, 668, "x = 1"), (220, 652, "y = 2")],
         ),
+        (
+            r"\sqrt{x}+\sum y+\int z",
+            [(220, 660, "√x+∑y+∫z")],
+        ),
     ],
 )
 def test_pdf_locates_stacked_equations(tmp_path, source, math_fragments):
@@ -593,7 +634,10 @@ def fake_engine(tmp_path, monkeypatch):
     def create(name, source):
         script = tmp_path / name
         script.write_text(source, encoding="utf-8")
-        monkeypatch.setattr(loc_resolver.shutil, "which", lambda _name: str(script))
+        # Keep unrelated subprocess discovery, including pypdf's, on the real PATH.
+        fake_shutil = SimpleNamespace(copyfile=loc_resolver.shutil.copyfile,
+                                      which=lambda _name: str(script))
+        monkeypatch.setattr(loc_resolver, "shutil", fake_shutil)
         return script, calls
 
     return create
@@ -699,7 +743,6 @@ else:
     assert not first.exists() and not third.exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Requires symlink support without elevation.")
 def test_tex_keeps_the_format_selecting_executable_name(tmp_path, fake_engine, monkeypatch):
     executable, calls = fake_engine(
         "pdftex",
@@ -708,7 +751,10 @@ def test_tex_keeps_the_format_selecting_executable_name(tmp_path, fake_engine, m
         "Path(sys.argv[-1]).with_suffix('.aux').touch()\n",
     )
     alias = tmp_path / "pdflatex"
-    alias.symlink_to(executable)
+    try:
+        alias.symlink_to(executable)
+    except OSError:
+        os.link(executable, alias)
     original = tmp_path / "article.tex"
     original.touch()
     monkeypatch.setattr(loc_resolver.shutil, "which", lambda _name: str(alias))

@@ -443,9 +443,8 @@ def _table(
             if row_index == header_rows - 1:
                 weight = 6
             elif row_index in range(header_rows - 1) and end_row == row_index and span > 1:
-                if any(
-                    not lower.covered for lower in block.header[row_index + 1][col + 1 : col + span]
-                ):
+                lower = block.header[row_index + 1][col]
+                if lower.covered or lower.col_span != span:
                     weight = 4
             elif row_index - header_rows in block.midrule_after:
                 weight = 4
@@ -683,8 +682,8 @@ class _Render:
         items = []
         paragraphs = []
 
-        def first_paragraph() -> etree._Element:
-            paragraph = _paragraph()
+        def first_paragraph(style: str = "Normal") -> etree._Element:
+            paragraph = _paragraph(style)
             if not items[-1]:
                 items[-1] = True
                 num = _w("numPr", paragraph[0])
@@ -711,8 +710,11 @@ class _Render:
                 if not items[-1]:
                     first_paragraph()
                 items.pop()
-            elif items and token.type in {"paragraph_open", "omm_display", "fence", "code_block"}:
-                paragraph = first_paragraph()
+            elif items and token.type in {
+                "paragraph_open", "heading_open", "omm_display", "fence", "code_block"
+            }:
+                style = f"Heading{token.tag[1:]}" if token.type == "heading_open" else "Normal"
+                paragraph = first_paragraph(style)
                 first, last = token.map
                 if token.type == "omm_display":
                     paragraph.append(

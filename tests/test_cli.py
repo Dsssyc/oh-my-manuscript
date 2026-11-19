@@ -230,12 +230,55 @@ def test_cli_requires_published_revision_for_defaults(
         assert not output.out
 
 
-@pytest.mark.parametrize("value", ["layout.pdf", "=layout.pdf", "manuscript="])
+@pytest.mark.parametrize(
+    "value",
+    ["layout.pdf", "=layout.pdf", "manuscript=", "manuscript=layout.pdf", "pdf:main=layout.pdf"],
+)
 def test_build_rejects_malformed_layout_pdf(
     cli_workspace: Path, capsys: pytest.CaptureFixture[str], value: str
 ) -> None:
     assert main(["build", "--cwd", str(cli_workspace), "--layout-pdf", value]) == 1
     assert "ERR_BAD_REQUEST" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["docx", "latex"])
+def test_build_accepts_unqualified_pdf_for_one_target(cli_workspace, monkeypatch, target):
+    def build(root, **options):
+        assert options["target"] == target
+        assert options["layout_pdfs"] == {target: {"manuscript": Path("layout.pdf")}}
+        return {}
+
+    monkeypatch.setattr("omm.cli.build_workspace", build)
+    assert main([
+        "build", "--cwd", str(cli_workspace), "--target", target,
+        "--layout-pdf", "manuscript=layout.pdf", "--json",
+    ]) == 0
+
+
+@pytest.mark.parametrize("name", [
+    "sub/paper", "sub\\paper", "paper..draft", "paper:copy", "paper\tname", "paper\x7fname",
+    "paper.", "paper ", "CON", "prn.v2", "AUX", "NuL.pdf", "com8", "LPT9.draft",
+])
+def test_manifest_rejects_unsafe_deliverable_name(cli_workspace, name):
+    assert main(["init", "--cwd", str(cli_workspace)]) == 0
+    manifest = cli_workspace / "manuscript.toml"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text.replace(
+        "[deliverables.manuscript]", f"[deliverables.{json.dumps(name, ensure_ascii=False)}]",
+    ), encoding="utf-8")
+    with pytest.raises(OmmError, match="ERR_MANIFEST_INVALID"):
+        load_workspace(cli_workspace)
+
+
+def test_manifest_rejects_casefold_duplicate_deliverable_names(cli_workspace):
+    assert main(["init", "--cwd", str(cli_workspace)]) == 0
+    manifest = cli_workspace / "manuscript.toml"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text + text[text.index("[deliverables.manuscript]"):].replace(
+        "deliverables.manuscript", "deliverables.Manuscript",
+    ), encoding="utf-8")
+    with pytest.raises(OmmError, match="ERR_MANIFEST_INVALID"):
+        load_workspace(cli_workspace)
 
 
 def test_build_only_produces_clean_without_a_milestone(
