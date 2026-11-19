@@ -16,7 +16,7 @@
 
 ---
 
-## `0.1` 核心工作流规划
+## `0.1` 核心工作流
 
 `oh-my-manuscript` 一次安装到全局统一的共享 Agent Skill 目录（`~/.agents/skills/oh-my-manuscript`，自动为已安装的编码智能体建立目录链接，并由单实例守护服务固定监听 `127.0.0.1:49638`），同时让每篇论文的**手稿工作区**原地自包含在各自的课题 Git 仓库中：
 
@@ -33,9 +33,13 @@
 
 ## 当前进度与验证边界
 
-> **当前状态（`0.1.0-dev` —— 核心契约已定稿，编码实现待启动）**：
-> - **已实现并验证**：Python 包与 `omm` 命令行外壳（`uv` + `pytest`）、中英双语（`zh-CN` / `en`）i18n 词条机制、五版面 Vite + React + TypeScript 前端工作台外壳（`tsc` 类型检查与生产构建），以及两份基础架构契约（`ADR-001` 与 `ADR-002`）。
-> - **尚未开始（`0.1` 待建范围）**：全局共享 Skill 安装器与单实例固定回环守护服务、结构化源稿 AST 解析器与 `(revision, block_id)` 同步引擎、`.omm/annotations.json` 批注存储与 Git 审阅点三级 Diff 引擎，以及 Word（`.docx` OOXML/OMML/原生修订）与 LaTeX（`.tex`）目标编译器。外部旧 `.docx` 逆向拆包导入（`ingest`）留待 `0.2`。
+`0.1` 核心工作流已在源码中实现，并通过无头自动化检查。覆盖结构化源稿解析、校验与打标、显式 `omm sync`、三级审阅点 Diff、五视图工作台，以及全局共享 Skill 和无窗口回环守护服务。`omm build` 生成 Clean 和 Marked Word `.docx` 与 LaTeX `.tex` 产物，并为回复信中的 `[#loc:...]` 回填页码与行号。
+
+位置引用未提供对应的 `--layout-pdf` 时，Word 目标需要本机安装无头 LibreOffice（`soffice`），LaTeX 目标需要 TeX 引擎。端到端测试使用带印出页边行号的 PDF 验证同一套位置反解流程，运行测试无需安装这些引擎。
+
+Word 产物由内置严格 OOXML 校验器检查。端到端验收样稿的 Word XML 部件通过官方 ECMA-376 XSD 校验，自动化测试还将接受和拒绝全部修订的投影分别与对应的 Clean 文档比较。投稿前请在桌面版 Microsoft Word 中复核实际字体、分页和修订效果。 [ECMA-376](https://ecma-international.org/publications-and-standards/standards/ecma-376/)
+
+旧版 `.docx` 导入（`ingest`）计划在 `0.2` 实现。
 
 ---
 

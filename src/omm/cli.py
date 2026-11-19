@@ -21,6 +21,7 @@ from omm.annotations import (
     reopen_annotation,
     resolve_annotation,
 )
+from omm.builder import build_workspace
 from omm.checker import check_workspace
 from omm.daemon import daemon_health, ensure_daemon, notify_daemon, restart_daemon, stop_daemon
 from omm.errors import Diagnostic, OmmError
@@ -72,6 +73,7 @@ _WORKSPACE_COMMANDS = {
     "check",
     "checkpoint",
     "annotate",
+    "build",
 }
 
 _RUNTIME_COMMANDS = {
@@ -227,6 +229,25 @@ def build_parser(locale: Locale) -> argparse.ArgumentParser:
             _add_json_option(subparser, locale)
         if command == "annotate":
             _add_annotation_actions(subparser, locale)
+        if command == "build":
+            subparser.add_argument(
+                "--target", choices=("docx", "latex", "all"), default="all",
+                help=t("cli.build_target_help", locale),
+            )
+            subparser.add_argument(
+                "--out-dir", type=Path, metavar="PATH", help=t("cli.build_out_dir_help", locale)
+            )
+            subparser.add_argument(
+                "--revision", metavar="REV", help=t("cli.build_revision_help", locale)
+            )
+            subparser.add_argument(
+                "--milestone", metavar="REV", help=t("cli.build_milestone_help", locale)
+            )
+            subparser.add_argument(
+                "--layout-pdf", action="append", default=[], metavar="[TARGET:]DELIVERABLE=PATH",
+                help=t("cli.build_layout_pdf_help", locale),
+            )
+            _add_json_option(subparser, locale)
     return parser
 
 
@@ -245,6 +266,28 @@ def _print_diagnostic(diagnostic: Diagnostic, locale: Locale) -> None:
 
 def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False))
+
+
+def _run_build(root: Path, args: argparse.Namespace, locale: Locale) -> None:
+    layout_pdfs = {}
+    for value in args.layout_pdf:
+        key, sep, path = value.partition("=")
+        target, qualified, name = key.partition(":")
+        if not qualified:
+            target, name = args.target, key
+        if not sep or not name.strip() or not path:
+            raise OmmError("ERR_BAD_REQUEST")
+        if target not in {"docx", "latex"} or args.target not in {target, "all"}:
+            raise OmmError("ERR_BAD_REQUEST")
+        layout_pdfs.setdefault(target, {})[name] = Path(path)
+    result = build_workspace(
+        root, target=args.target, out_dir=args.out_dir, revision=args.revision,
+        milestone=args.milestone, layout_pdfs=layout_pdfs,
+    )
+    if args.json:
+        _print_json(result)
+    else:
+        print(t("cli.build_done", locale, **result))
 
 
 def _console(root: Path) -> dict:
@@ -388,11 +431,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.print_help()
             return 0
         root = args.cwd if args.cwd is not None else Path.cwd()
-        if args.command == "build":
-            _print_diagnostic(
-                OmmError("ERR_NOT_IMPLEMENTED", command=args.command).diagnostic, locale
-            )
-            return 2
         if args.command == "console" or args.command in _RUNTIME_COMMANDS:
             result = (
                 _console(resolve_path(root)) if args.command == "console"
@@ -440,6 +478,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(t("cli.checkpoint_set", locale, checkpoint=checkpoint))
             case "annotate":
                 return _run_annotate(root, args, locale)
+            case "build":
+                _run_build(root, args, locale)
     except OmmError as exc:
         _print_diagnostic(exc.diagnostic, locale)
         json_output = "--json" in args_list if args is None else getattr(args, "json", False)

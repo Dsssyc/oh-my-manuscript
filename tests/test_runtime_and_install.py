@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import ntpath
 import os
 import shutil
 import socket
@@ -13,16 +15,18 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from http.client import HTTPConnection
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 
 import omm
+from omm import runtime, workspace
 from omm.daemon import ensure_daemon, stop_daemon
 from omm.errors import OmmError
 from omm.runtime import configured_port, install_omm, state_directory, write_json_object
 from omm.server import CONTRACT_VERSION, DEFAULT_PORT, LOOPBACK
-from omm.workspace import load_workspace, resolve_path
+from omm.workspace import fs_path, load_workspace, resolve_path
 
 _SKILL_DIGEST = "8e8a4819bd105459cad2d48c494de71f5acb899c0e85e2bfe408e7d07fb3fd6a"
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -139,6 +143,25 @@ def test_install_and_launch_stable_runtime(isolated: Path, monkeypatch: pytest.M
     assert not list(package.parent.glob("*editable*"))
     assert not (package.parent / "pytest").exists()
     assert (package.parent / "mdurl").is_dir()
+    hook = (package.parent / "_omm.pth").read_text(encoding="utf-8").splitlines()
+    assert len(hook) == 1 and hook[0].startswith("import ")
+    [record] = package.parent.glob("oh_my_manuscript-*.dist-info/RECORD")
+    with record.open(encoding="utf-8", newline="") as stream:
+        assert "_omm.pth" in {row[0] for row in csv.reader(stream)}
+    paths = [r"C:\runtime\site-packages", r"\\server\share\venv", r"\\?\C:\already", "relative", ""]
+    invalidations = []
+    modules = {
+        "os": SimpleNamespace(name="nt", path=ntpath),
+        "sys": SimpleNamespace(path=paths),
+        "importlib": SimpleNamespace(invalidate_caches=lambda: invalidations.append(True)),
+    }
+    # Execute the generated startup hook with isolated imports and a Windows path module.
+    exec(hook[0], {"__builtins__": {"__import__": lambda name, *_: modules[name]}})  # noqa: S102
+    assert paths == [
+        r"\\?\C:\runtime\site-packages", r"\\?\UNC\server\share\venv",
+        r"\\?\C:\already", "relative", "",
+    ]
+    assert invalidations == [True]
     assert _cli("paths", "--json", launcher=launcher)["skill_root"] == str(skill)
     health = _cli("health", "--json", launcher=launcher)
     assert health["status"] == "unavailable" and health["source_leak"] is False
@@ -153,6 +176,89 @@ def test_install_and_launch_stable_runtime(isolated: Path, monkeypatch: pytest.M
     assert not repeated["created"]
     assert repeated["runtime_id"] == installed["runtime_id"]
     assert (runtime / "READY.json").stat().st_mtime_ns == ready_stat.st_mtime_ns
+
+
+def test_install_and_reuse_deep_runtime_with_utf8(isolated, monkeypatch):
+    padding = "运行时-" + "x" * (190 - len(str(isolated)))
+    runtime_root = isolated / padding
+    monkeypatch.setenv("OMM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setenv("PYTHONUTF8", "1")
+    monkeypatch.delenv("OMM_DEV_SOURCE")
+    (isolated / "Host Home" / ".claude").mkdir()
+
+    try:
+        installed = _cli("install", "--json")
+        assert installed["created"]
+        directory = runtime_root / "runtimes" / installed["runtime_id"]
+        launcher = _launcher(Path(installed["skill_root"]))
+        inspected = _cli("runtime", "--json", launcher=launcher)
+        assert inspected["runtime_id"] == installed["runtime_id"]
+        assert inspected["python"] == installed["python"]
+        assert inspected["dev_source"] is False and inspected["source_leak"] is False
+        assert len(inspected["python"]) < 250
+        assert len(inspected["omm_file"]) > 260
+        assert Path(inspected["omm_file"]).is_relative_to(directory)
+        for output in (installed, inspected):
+            assert all("\\\\?\\" not in path for path in (
+                output[key] for key in ("python", "web_dist", "skill_root", "omm_file")
+                if key in output
+            ))
+
+        resource = Path(installed["web_dist"]).parents[1].joinpath(
+            "lxml", "isoschematron", "resources", "xsl", "iso-schematron-xslt1",
+            "iso_dsdl_include.xsl",
+        )
+        assert len(str(resource)) > 280 and fs_path(resource).is_file()
+        if os.name == "nt":
+            package = resource.parents[4]
+            [extension] = fs_path(package).glob("etree*.pyd")
+            assert len(str(package / extension.name)) > 260
+            subprocess.run(
+                [inspected["python"], "-I", "-c", "import lxml.etree"],
+                check=True, capture_output=True, timeout=15, creationflags=_NO_WINDOW,
+            )
+        ready_file = fs_path(directory / "READY.json")
+        ready = _read(ready_file)
+        assert _read(fs_path(runtime_root / "active-runtime.json")) == ready
+        assert ready["python"] == installed["python"] and ready["web_dist"] == installed["web_dist"]
+        ready_mtime = ready_file.stat().st_mtime_ns
+        assert _cli("install", "--json") == {**installed, "created": False}
+        assert ready_file.stat().st_mtime_ns == ready_mtime
+    finally:
+        if fs_path(runtime_root).exists():
+            shutil.rmtree(fs_path(runtime_root))
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (r"C:\outer\..\here", r"\\?\C:\here"),
+        (r"\\server\share\run", r"\\?\UNC\server\share\run"),
+        (r"\\?\C:\already", r"\\?\C:\already"),
+    ],
+)
+def test_fs_path_uses_extended_windows_drive_and_unc_paths(monkeypatch, path, expected):
+    monkeypatch.setattr(workspace, "_WINDOWS_PATHS", True)
+    monkeypatch.setattr(workspace, "abspath", ntpath.abspath)
+    monkeypatch.setattr(workspace, "Path", PureWindowsPath)
+    assert str(fs_path(PureWindowsPath(path))) == expected
+
+
+def test_windows_junction_commands_capture_localized_output_as_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(runtime, "os", SimpleNamespace(name="nt", path=os.path, environ=os.environ))
+    monkeypatch.setattr(runtime.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    calls = []
+
+    def run(command, **kwargs):
+        assert kwargs["capture_output"]
+        assert not kwargs.get("text")
+        calls.append(kwargs["env"]["OMM_LINK"])
+        return subprocess.CompletedProcess(command, 0, "已创建联接".encode("gbk"), b"")
+
+    monkeypatch.setattr(runtime.subprocess, "run", run)
+    runtime._link_skill(tmp_path / "skill-link", tmp_path / "skill")
+    runtime._link_runtime(tmp_path, tmp_path / "runtime")
+    assert calls == [str(tmp_path / name) for name in ("skill-link", ".runtime")]
 
 
 @pytest.mark.parametrize("kind", ["directory", "foreign_link", "dangling_link"])

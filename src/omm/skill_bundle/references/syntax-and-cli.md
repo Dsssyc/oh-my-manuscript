@@ -31,9 +31,21 @@ Use the installed `omm` launcher with `--cwd PATH` on Workspace commands or run 
 | `annotate resolve ID [--after-rev REV] [--json]` | Record a Resolution Snapshot against a published revision. |
 | `annotate reopen ID [--json]` | Reopen an Annotation. |
 | `annotate delete ID [--json]` | Delete an Annotation. JSON includes its `id`. |
-| `build` | Reserved for submission compilation. |
+| `build [--target docx\|latex\|all] [--out-dir PATH] [--revision REV] [--milestone REV] [--layout-pdf [TARGET:]DELIVERABLE=PATH]… [--json]` | Compile Clean and, when a Submission Milestone applies, Marked deliverables. |
 
 Annotation JSON includes `id`, `block_id`, `selector`, `comment`, `base_rev`, `created_at`, `before_block_md`, `resolutions`, and derived `status`. See subcommand help for the revision and selector options.
+
+### Submission builds
+
+`omm build` defaults to both formats (`--target all`) and writes to the Workspace's `.omm/build/`. Relative `--out-dir` and layout paths resolve from the directory where you invoke the command. `--cwd` selects the Workspace. Builds from temporary Git worktrees preserve the global Workspace registration.
+
+The default input is `refs/omm/published`. Run `omm sync` before building a changed Workspace, or use `--revision REV` to explicitly build a Git snapshot while editing. `--milestone REV` selects the comparison revision for Marked manuscript and supplementary files. By default, the compiler selects the newest ancestral `v*-submitted` tag strictly before the requested revision. It emits Clean files when there is no eligible tag and requires an explicit milestone when the tags have no unique latest ancestor.
+
+For reply locations, supply a PDF exported from the corresponding Clean deliverable with printed margin line numbers. With `--target all`, qualify each PDF with its format, such as `--layout-pdf docx:manuscript=word-numbered.pdf --layout-pdf latex:manuscript=tex-numbered.pdf`. With a single target, the prefix is optional, so `--target docx --layout-pdf manuscript=word-numbered.pdf` also works. For each referenced deliverable without a supplied PDF for its format, the Word target uses headless LibreOffice (`soffice`) and the LaTeX target uses a headless TeX engine's `.aux` labels. Workspaces without location references in compiled content need neither engine.
+
+The default output directory is `.omm/build`. A custom output directory inside the workspace must be a subdirectory of `.omm`. The workspace root and its ancestors are invalid output directories.
+
+`--json` reports the resolved Git IDs (`revision`, `milestone`), the absolute `out_dir`, and the requested `targets`. `deliverables` is keyed by target and deliverable name, with absolute `clean`, optional `marked` (or `null`), and `assets` paths. `resolved_locations` is keyed by target and then by block ID or `start..end` range.
 
 ## Runtime and workbench commands
 
@@ -64,4 +76,10 @@ Runtime command failures exit nonzero and report a diagnostic on stderr. With `-
 | `ERR_DAEMON_RUNTIME_MISMATCH` | Ask the author to authorize `restart` to switch the daemon to the active runtime. |
 | `ERR_DAEMON_STOP_UNCONFIRMED` | Preserve the instance record for diagnosis and ask the author to check the daemon process and its state directory. |
 | `ERR_SYNC_CONFLICT` | Read the current published revision, reconcile changes, and retry `sync`. |
-| `ERR_NO_PUBLISHED_REVISION` | Publish a revision before using it for a Checkpoint or Annotation. |
+| `ERR_NO_PUBLISHED_REVISION` | Run `omm sync` to publish a revision for the build, Checkpoint, or Annotation. |
+| `ERR_BUILD_UNSYNCED_CHANGES` | Publish the disk changes with `omm sync`, or use `--revision REV` to explicitly build a Git snapshot. |
+| `ERR_LOCATION_LAYOUT_REQUIRED` | Supply a numbered Clean PDF with `--layout-pdf` or make the target's headless layout engine available. |
+| `ERR_LAYOUT_PDF_INVALID` | Check the deliverable name, the PDF's match to the requested Clean revision, and the printed margin line numbers. |
+| `ERR_MILESTONE_AMBIGUOUS` | Select the intended Submission Milestone with `--milestone REV`. |
+| `ERR_FIGURE_FORMAT_UNSUPPORTED` | Supply a supported raster figure (PNG, JPEG, GIF, BMP, or TIFF) for the Word target. |
+| `ERR_DOCX_PACKAGE_INVALID` | Use the failing OOXML validation detail to identify the affected part. Report reproducible compiler failures with the relevant Structured Source and assets. |

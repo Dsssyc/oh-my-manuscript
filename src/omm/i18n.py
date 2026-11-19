@@ -151,6 +151,10 @@ _DIAGNOSTICS = {
     "ERR_BLOCK_ATTRIBUTES_INVALID": ("Invalid block attributes.", "块属性无效。"),
     "ERR_BLOCK_ID_INVALID": ("Invalid block ID.", "块标识无效。"),
     "ERR_BLOCK_ID_MISSING": ("This block needs a block ID.", "此块缺少块标识。"),
+    "ERR_BUILD_UNSYNCED_CHANGES": (
+        "The workspace has unsynced changes. Run omm sync first or pass --revision.",
+        "手稿工作区存在尚未同步的改动。请先运行 omm sync，或显式传入 --revision。",
+    ),
     "ERR_CITATION_MISSING": ("No BibTeX entry for {key}.", "BibTeX 中缺少条目 {key}。"),
     "ERR_DIRECTIVE_INVALID": ("Invalid {kind} directive.", "{kind} 指令块无效。"),
     "ERR_DIRECTIVE_UNCLOSED": ("Directive is missing its closing fence.", "指令块缺少闭合栅栏。"),
@@ -158,11 +162,19 @@ _DIAGNOSTICS = {
         "Closing fence has no matching directive.",
         "闭合栅栏缺少对应的指令块。",
     ),
+    "ERR_DOCX_PACKAGE_INVALID": (
+        "Generated Word package failed strict OOXML validation. {detail}",
+        "生成的 Word 文档未通过严格 OOXML 校验。{detail}",
+    ),
     "ERR_DUPLICATE_BLOCK_ID": ("Duplicate block ID.", "块标识重复。"),
     "ERR_FIGURE_ASSET_MISSING": ("Figure asset {asset} was not found.", "找不到插图资产 {asset}。"),
     "ERR_FIGURE_ASSET_UNREADABLE": (
         "Cannot read figure asset {asset}.",
         "无法读取插图资产 {asset}。",
+    ),
+    "ERR_FIGURE_FORMAT_UNSUPPORTED": (
+        "Unsupported figure asset format for target compilation: {asset}",
+        "目标编译器不支持该插图资产格式：{asset}",
     ),
     "ERR_FIGURE_INVALID": (
         "A Figure Block needs image lines followed by one Caption.",
@@ -196,6 +208,20 @@ _DIAGNOSTICS = {
     "ERR_LOCATION_CONTEXT": (
         "Use location references in the response letter.",
         "请在回复信中使用物理位置引用。",
+    ),
+    "ERR_LAYOUT_PDF_INVALID": (
+        "Invalid or mismatched layout PDF for deliverable {deliverable}. {detail}",
+        "投稿产物 {deliverable} 的排版 PDF 无效或与当前版本不匹配。{detail}",
+    ),
+    "ERR_LOCATION_LAYOUT_REQUIRED": (
+        (
+            "Cannot resolve location references for {deliverable} ({clean_file}): "
+            "pass --layout-pdf [TARGET:]{deliverable}=PATH or install headless LibreOffice (soffice) / TeX."
+        ),
+        (
+            "无法反解投稿产物 {deliverable}（{clean_file}）的物理页码与行号："
+            "请传入 --layout-pdf [TARGET:]{deliverable}=PATH，或安装无头 LibreOffice（soffice）/ TeX 依赖。"
+        ),
     ),
     "ERR_LOCATION_RANGE_AMBIGUOUS": (
         "Range {start}..{end} appears in multiple deliverables.",
@@ -241,6 +267,10 @@ _DIAGNOSTICS = {
         "公式使用了不受支持的 LaTeX 环境。",
     ),
     "ERR_METHOD_NOT_ALLOWED": ("This HTTP method is unavailable.", "此处不支持该 HTTP 方法。"),
+    "ERR_MILESTONE_AMBIGUOUS": (
+        "Multiple diverging Submission Milestone tags exist; specify one with --milestone.",
+        "存在多个分叉的投稿里程碑标签，请通过 --milestone 显式指定。",
+    ),
     "ERR_NO_PUBLISHED_REVISION": (
         "No revision has been published. Run omm sync first.",
         "尚无已发布版本。请先运行 omm sync。",
@@ -352,6 +382,30 @@ _CLI_MESSAGES = {
     "cli.stamped": ("Assigned {count} block IDs.", "已分配 {count} 个块标识。"),
     "cli.check_ok": ("Workspace checks passed.", "手稿工作区检查通过。"),
     "cli.json_help": ("Print the result as JSON.", "以 JSON 输出结果。"),
+    "cli.build_target_help": (
+        "Output format (default: all).",
+        "输出格式（默认 all，即 Word 和 LaTeX）。",
+    ),
+    "cli.build_out_dir_help": (
+        "Output directory relative to the invocation directory (default: Workspace .omm/build).",
+        "相对路径从命令调用目录解析（默认手稿工作区的 .omm/build）。",
+    ),
+    "cli.build_revision_help": (
+        "Git revision to compile (default: refs/omm/published, with no unsynced changes).",
+        "要构建的 Git 版本（默认 refs/omm/published，要求源稿已同步）。",
+    ),
+    "cli.build_milestone_help": (
+        "Revision for Marked output (default: latest ancestral v*-submitted tag, if any).",
+        "修订稿的投稿里程碑（默认选择最新的祖先 v*-submitted 标签，如有）。",
+    ),
+    "cli.build_layout_pdf_help": (
+        "Numbered PDF of a Clean deliverable (prefix with docx: or latex: when --target all).",
+        "指定带页边行号的 Clean 产物 PDF（当 --target all 时需加 docx: 或 latex: 前缀）。",
+    ),
+    "cli.build_done": (
+        "Built revision {revision} in {out_dir}.",
+        "已将版本 {revision} 的投稿产物写入 {out_dir}。",
+    ),
     "cli.expected_rev_help": (
         "Expected current published revision.",
         "预期的当前已发布版本。",

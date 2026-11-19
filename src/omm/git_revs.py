@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
@@ -59,6 +59,7 @@ class RevisionSnapshot:
     bibliography: dict[str, BibEntry]
     documents: dict[str, ast.Document]
     blocks: dict[str, RevisionBlockEntry]
+    assets: dict[str, bytes] = field(default_factory=dict)
 
 
 class _Repository:
@@ -443,6 +444,7 @@ def load_workspace_at_revision(root: Path, rev_or_ref: str) -> RevisionSnapshot:
     bibliography = parse_bib(tree.text(workspace.bibliography), repo.root / workspace.bibliography)
     documents: dict[str, ast.Document] = {}
     blocks: dict[str, RevisionBlockEntry] = {}
+    assets: dict[str, bytes] = {}
     fingerprints: dict[str, str] = {}
     for source in workspace.sources:
         path = repo.root / source
@@ -456,7 +458,9 @@ def load_workspace_at_revision(root: Path, rev_or_ref: str) -> RevisionSnapshot:
             hashes = []
             for asset in _assets(block):
                 if asset not in fingerprints:
-                    fingerprints[asset] = hashlib.sha256(tree.read(asset)).hexdigest()
+                    data = tree.read(asset)
+                    assets[asset] = data
+                    fingerprints[asset] = hashlib.sha256(data).hexdigest()
                 hashes.append(fingerprints[asset])
             block_id = block.block_id
             if block_id is None:
@@ -474,7 +478,7 @@ def load_workspace_at_revision(root: Path, rev_or_ref: str) -> RevisionSnapshot:
                 # Ordered fixed-width digests distinguish both replacement and panel reordering.
                 asset_sha256 = hashlib.sha256(bytes.fromhex("".join(hashes))).hexdigest()
             blocks[block_id] = RevisionBlockEntry(source, deliverables, block, asset_sha256)
-    return RevisionSnapshot(revision, workspace, bibliography, documents, blocks)
+    return RevisionSnapshot(revision, workspace, bibliography, documents, blocks, assets)
 
 
 def lookup_block_at_revision(

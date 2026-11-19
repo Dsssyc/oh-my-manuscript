@@ -42,7 +42,7 @@ _SCHEMA: dict[str, str] = {
     "m:oMathPara": "oMathParaPr? oMath+",
     "m:oMathParaPr": "jc?",
     "m:r": "rPr? t+",
-    "m:rPr": "scr? sty? nor? aln?",
+    "m:rPr": "nor? scr? sty? aln?",
     "m:f": "fPr? num den",
     "m:fPr": "type? ctrlPr?",
     "m:type": "",
@@ -200,6 +200,10 @@ def assert_ecma376(root: etree._Element) -> None:
         assert _sequence_matches(_PATTERNS[tag], children), (
             f"{tag} violates ECMA-376 child order: [{children}]"
         )
+        if tag == "m:rPr" and "m:nor" in children:
+            assert {"m:scr", "m:sty"}.isdisjoint(children), (
+                "m:nor is mutually exclusive with math script and style"
+            )
         for attr in element.attrib:
             assert attr in _ATTRS.get(tag, set()), f"{tag} has stray attribute {attr}"
         if tag in ("m:t", "w:t"):
@@ -378,8 +382,7 @@ def test_text_run_is_normal_text_with_preserved_space() -> None:
     runs = _findall(root, "m:r")
     assert _texts(runs[0]) == "otherwise\u00A0"
     rpr = runs[0].find("m:rPr", NS)
-    assert _find(rpr, "m:nor") is not None
-    assert _find(rpr, "m:sty").get(VAL) == "p"
+    assert _tags(list(rpr)) == ["m:nor"]
     assert runs[0].find("m:t", NS).get(XML_SPACE) == "preserve"
     assert runs[1].find("m:rPr", NS) is None
 

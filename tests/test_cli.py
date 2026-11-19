@@ -17,7 +17,7 @@ from omm.cli import COMMANDS, _print_diagnostic, main
 from omm.errors import OmmError
 from omm.git_revs import LATEST_CHECKPOINT_REF, PUBLISHED_REF
 from omm.i18n import MESSAGES, Locale
-from omm.workspace import ANNOTATIONS, load_workspace
+from omm.workspace import ANNOTATIONS, load_workspace, resolve_path
 
 
 @pytest.fixture(autouse=True)
@@ -48,10 +48,12 @@ def test_cli_writes_utf8_with_legacy_stream_encoding(
     assert Path(json.loads(paths.stdout)["omm_home"]).name == home.name
 
     build = subprocess.run(
-        [*command, "build"], env=env, capture_output=True, check=False, timeout=15
+        [*command, "build", "--layout-pdf", "invalid"],
+        env=env, capture_output=True, check=False, timeout=15,
     )
-    assert build.returncode == 2
-    assert "子命令".encode() in build.stderr
+    assert build.returncode == 1
+    assert b"ERR_BAD_REQUEST" in build.stderr
+    assert "请求无效".encode() in build.stderr
 
 
 def test_i18n_catalog_covers_source_diagnostics() -> None:
@@ -109,12 +111,6 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
     assert __version__ in capsys.readouterr().out
 
 
-def test_unimplemented_subcommand_returns_error_code(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = main(["--lang", "en", "build"])
-    assert rc == 2
-    assert "ERR_NOT_IMPLEMENTED" in capsys.readouterr().err
-
-
 def test_removed_serve_subcommand_is_rejected() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["serve"])
@@ -134,6 +130,7 @@ def test_workspace_lifecycle_and_read_only_checks(
     assert "已初始化手稿工作区" in capsys.readouterr().out
     assert (root / ".git").is_dir()
     assert "/.omm/cache/" in (root / ".gitignore").read_text(encoding="utf-8")
+    assert "/.omm/build/" in (root / ".gitignore").read_text(encoding="utf-8")
     assert (root / "figures").is_dir()
     assert (root / "references.bib").is_file()
     registry = state / "workspaces.json"
@@ -222,6 +219,7 @@ def test_cli_requires_published_revision_for_defaults(
     assert main([*common, "init"]) == 0
     capsys.readouterr()
     for command in (
+        ["build", "--json"],
         ["checkpoint", "--json"],
         ["annotate", "create", "--block-id", "sec-introduction", "--comment", "Review.", "--json"],
         ["annotate", "resolve", "550e8400-e29b-41d4-a716-446655440000", "--json"],
@@ -230,6 +228,108 @@ def test_cli_requires_published_revision_for_defaults(
         output = capsys.readouterr()
         assert "ERR_NO_PUBLISHED_REVISION" in output.err
         assert not output.out
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["layout.pdf", "=layout.pdf", "manuscript=", "manuscript=layout.pdf", "pdf:main=layout.pdf"],
+)
+def test_build_rejects_malformed_layout_pdf(
+    cli_workspace: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    assert main(["build", "--cwd", str(cli_workspace), "--layout-pdf", value]) == 1
+    assert "ERR_BAD_REQUEST" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["docx", "latex"])
+def test_build_accepts_unqualified_pdf_for_one_target(cli_workspace, monkeypatch, target):
+    def build(root, **options):
+        assert options["target"] == target
+        assert options["layout_pdfs"] == {target: {"manuscript": Path("layout.pdf")}}
+        return {}
+
+    monkeypatch.setattr("omm.cli.build_workspace", build)
+    assert main([
+        "build", "--cwd", str(cli_workspace), "--target", target,
+        "--layout-pdf", "manuscript=layout.pdf", "--json",
+    ]) == 0
+
+
+@pytest.mark.parametrize("name", [
+    "sub/paper", "sub\\paper", "paper..draft", "paper:copy", "paper\tname", "paper\x7fname",
+    "paper.", "paper ", "CON", "prn.v2", "AUX", "NuL.pdf", "com8", "LPT9.draft",
+    "draft?", "COM¹", "CONOUT$", "CONIN$", "CLOCK$", "LPT².v2", "main=rev",
+])
+def test_manifest_rejects_unsafe_deliverable_name(cli_workspace, name):
+    assert main(["init", "--cwd", str(cli_workspace)]) == 0
+    manifest = cli_workspace / "manuscript.toml"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text.replace(
+        "[deliverables.manuscript]", f"[deliverables.{json.dumps(name, ensure_ascii=False)}]",
+    ), encoding="utf-8")
+    with pytest.raises(OmmError, match="ERR_MANIFEST_INVALID"):
+        load_workspace(cli_workspace)
+
+
+def test_manifest_rejects_casefold_duplicate_deliverable_names(cli_workspace):
+    assert main(["init", "--cwd", str(cli_workspace)]) == 0
+    manifest = cli_workspace / "manuscript.toml"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(text + text[text.index("[deliverables.manuscript]"):].replace(
+        "deliverables.manuscript", "deliverables.Manuscript",
+    ), encoding="utf-8")
+    with pytest.raises(OmmError, match="ERR_MANIFEST_INVALID"):
+        load_workspace(cli_workspace)
+
+
+def test_manifest_allows_unicode_deliverable_name(cli_workspace):
+    assert main(["init", "--cwd", str(cli_workspace)]) == 0
+    manifest = cli_workspace / "manuscript.toml"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(
+        text.replace("[deliverables.manuscript]", '[deliverables."修订稿 β"]'), encoding="utf-8"
+    )
+    assert list(load_workspace(cli_workspace).deliverables) == ["修订稿 β"]
+
+
+def test_build_only_produces_clean_without_a_milestone(
+    cli_workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    common = ["--cwd", str(cli_workspace)]
+    assert main([*common, "init"]) == 0
+    assert main([*common, "sync", "--json"]) == 0
+    revision = json.loads(capsys.readouterr().out.splitlines()[-1])["revision"]
+
+    out_dir = resolve_path(tmp_path / "submission")
+    out_dir.mkdir()
+    for filename in ("manuscript.marked.docx", "manuscript.marked.tex", "other.marked.tex"):
+        (out_dir / filename).write_bytes(b"previous build")
+
+    monkeypatch.chdir(tmp_path)
+    assert main(["build", *common, "--out-dir", "submission", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {
+        "revision": revision,
+        "milestone": None,
+        "out_dir": str(out_dir),
+        "targets": ["docx", "latex"],
+        "deliverables": {
+            target: {
+                "manuscript": {
+                    "clean": str(out_dir / f"manuscript.clean.{extension}"),
+                    "marked": None,
+                    "assets": [],
+                }
+            }
+            for target, extension in (("docx", "docx"), ("latex", "tex"))
+        },
+        "resolved_locations": {"docx": {}, "latex": {}},
+    }
+    assert {path.name for path in out_dir.iterdir()} == {
+        "manuscript.clean.docx", "manuscript.clean.tex", "other.marked.tex",
+    }
+    assert (out_dir / "other.marked.tex").read_bytes() == b"previous build"
 
 
 def test_cli_revision_and_annotation_lifecycle(
