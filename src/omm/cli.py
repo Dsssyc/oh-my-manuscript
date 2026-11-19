@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -21,6 +22,7 @@ from omm.annotations import (
     resolve_annotation,
 )
 from omm.checker import check_workspace
+from omm.daemon import daemon_health, ensure_daemon, notify_daemon, restart_daemon, stop_daemon
 from omm.errors import Diagnostic, OmmError
 from omm.git_revs import (
     PUBLISHED_REF,
@@ -31,8 +33,16 @@ from omm.git_revs import (
     sync_workspace,
 )
 from omm.i18n import Locale, detect_locale, t
+from omm.runtime import dispatch_active, inspect_paths, inspect_runtime, install_omm
 from omm.stamp import stamp_workspace
-from omm.workspace import init_workspace, register_workspace, relocate_workspace
+from omm.workspace import (
+    MANIFEST,
+    init_workspace,
+    load_workspace,
+    register_workspace,
+    relocate_workspace,
+    resolve_path,
+)
 
 COMMANDS: tuple[str, ...] = (
     "install",
@@ -63,6 +73,26 @@ _WORKSPACE_COMMANDS = {
     "checkpoint",
     "annotate",
 }
+
+_RUNTIME_COMMANDS = {
+    "install": install_omm,
+    "health": daemon_health,
+    "runtime": inspect_runtime,
+    "paths": inspect_paths,
+    "restart": restart_daemon,
+    "stop": stop_daemon,
+}
+
+
+def _leading_command(argv: Sequence[str]) -> str | None:
+    """Recognize install before asking the active CLI to parse the other commands."""
+    tokens = iter(argv)
+    for token in tokens:
+        if token in ("--cwd", "--lang"):
+            next(tokens, None)
+        elif not token.startswith(("--cwd=", "--lang=")):
+            return token
+    return None
 
 
 def _preparse_locale(argv: Sequence[str]) -> Locale:
@@ -176,7 +206,11 @@ def build_parser(locale: Locale) -> argparse.ArgumentParser:
     for command in COMMANDS:
         help_text = t(f"cmd.{command}.help", locale)
         subparser = subparsers.add_parser(command, help=help_text, description=help_text)
-        _add_subcommand_options(subparser, locale, workspace=command in _WORKSPACE_COMMANDS)
+        _add_subcommand_options(
+            subparser, locale, workspace=command in _WORKSPACE_COMMANDS or command == "console"
+        )
+        if command in _RUNTIME_COMMANDS or command == "console":
+            _add_json_option(subparser, locale)
         if command == "init":
             subparser.add_argument(
                 "--title", default=t("cli.default_title", locale), help=t("cli.title_help", locale)
@@ -211,6 +245,34 @@ def _print_diagnostic(diagnostic: Diagnostic, locale: Locale) -> None:
 
 def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False))
+
+
+def _console(root: Path) -> dict:
+    workspace_id = None
+    try:
+        if (root / MANIFEST).is_file():
+            workspace_id = load_workspace(root).workspace_id
+    except OmmError:
+        pass
+    result = ensure_daemon()
+    result["workspace_id"] = workspace_id
+    if workspace_id is not None:
+        result["url"] += f"#workspaces/{workspace_id}"
+    return result
+
+
+def _print_runtime_result(command: str, result: dict, locale: Locale, json_output: bool) -> None:
+    if json_output:
+        _print_json(result)
+    elif command in ("console", "restart"):
+        print(result["url"])
+    elif command == "stop":
+        print(t("cli.daemon_stopped" if result["stopped"] else "cli.daemon_absent", locale))
+    elif command == "install":
+        print(t("cli.installed", locale, **result))
+    else:
+        for key, value in result.items():
+            print(f"{key}={value}")
 
 
 def _annotation_json(annotation: Annotation) -> dict[str, object]:
@@ -290,12 +352,14 @@ def _run_annotate(root: Path, args: argparse.Namespace, locale: Locale) -> int:
             annotation = reopen_annotation(root, args.id)
         case "delete":
             delete_annotation(root, args.id)
+            notify_daemon("annotations_changed", root)
             if args.json:
                 _print_json({"id": args.id})
             else:
                 print(t("cli.annotation_deleted", locale, id=args.id))
             return 0
 
+    notify_daemon("annotations_changed", root)
     if args.json:
         _print_json(_annotation_json(annotation))
     else:
@@ -304,33 +368,57 @@ def _run_annotate(root: Path, args: argparse.Namespace, locale: Locale) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure) and getattr(stream, "encoding", None) != "utf-8":
+            with suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8")
     args_list = list(sys.argv[1:] if argv is None else argv)
-    parser = build_parser(_preparse_locale(args_list))
-    args = parser.parse_args(args_list)
-    locale = args.lang
-    if args.command is None:
-        parser.print_help()
-        return 0
-    if args.command not in _WORKSPACE_COMMANDS:
-        print(t("err.not_implemented", locale, command=args.command), file=sys.stderr)
-        return 2
-
-    root = args.cwd if args.cwd is not None else Path.cwd()
+    locale = _preparse_locale(args_list)
+    command = _leading_command(args_list)
+    args = None
     try:
+        forwarded = dispatch_active(command, args_list)
+        if forwarded is not None:
+            return forwarded
+        parser = build_parser(locale)
+        args = parser.parse_args(args_list)
+        command, locale = args.command, args.lang
+        if args.command is None:
+            parser.print_help()
+            return 0
+        root = args.cwd if args.cwd is not None else Path.cwd()
+        if args.command == "build":
+            _print_diagnostic(
+                OmmError("ERR_NOT_IMPLEMENTED", command=args.command).diagnostic, locale
+            )
+            return 2
+        if args.command == "console" or args.command in _RUNTIME_COMMANDS:
+            result = (
+                _console(resolve_path(root)) if args.command == "console"
+                else _RUNTIME_COMMANDS[args.command]()
+            )
+            _print_runtime_result(args.command, result, locale, args.json)
+            return 0
         match args.command:
             case "init":
                 workspace = init_workspace(root, args.title)
+                notify_daemon("workspaces_changed", workspace.workspace_id)
                 print(t("cli.initialized", locale, path=workspace.root))
             case "register":
                 workspace = register_workspace(root)
+                notify_daemon("workspaces_changed", workspace.workspace_id)
                 print(t("cli.registered", locale, path=workspace.root))
             case "relocate":
                 workspace = relocate_workspace(root, replace=args.replace)
+                notify_daemon("workspaces_changed", workspace.workspace_id)
                 print(t("cli.relocated", locale, path=workspace.root))
             case "stamp":
                 print(t("cli.stamped", locale, count=stamp_workspace(root)))
             case "sync":
                 result = sync_workspace(root, expected_old_rev=args.expected_rev)
+                if result.changed:
+                    notify_daemon("revision_published", root, revision=result.revision)
                 if args.json:
                     _print_json({"revision": result.revision, "changed": result.changed})
                 else:
@@ -345,6 +433,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(t("cli.check_ok", locale))
             case "checkpoint":
                 checkpoint = mark_checkpoint(root, revision=args.revision)
+                notify_daemon("checkpoint_updated", root, checkpoint=checkpoint)
                 if args.json:
                     _print_json({"checkpoint": checkpoint})
                 else:
@@ -353,6 +442,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return _run_annotate(root, args, locale)
     except OmmError as exc:
         _print_diagnostic(exc.diagnostic, locale)
+        json_output = "--json" in args_list if args is None else getattr(args, "json", False)
+        if (command == "console" or command in _RUNTIME_COMMANDS) and json_output:
+            _print_json({
+                "code": exc.code,
+                "message": t(exc.code, locale, **dict(exc.diagnostic.params)),
+                **exc.diagnostic.params,
+            })
         return 1
     return 0
 

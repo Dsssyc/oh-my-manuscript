@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,10 +20,38 @@ from omm.i18n import MESSAGES, Locale
 from omm.workspace import ANNOTATIONS, load_workspace
 
 
+@pytest.fixture(autouse=True)
+def isolated_cli_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OMM_DEV_SOURCE", "1")
+    monkeypatch.setenv("OMM_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("OMM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+
 def test_i18n_catalog_key_parity() -> None:
     assert set(MESSAGES["en"].keys()) == set(MESSAGES["zh-CN"].keys())
     for cmd in COMMANDS:
         assert f"cmd.{cmd}.help" in MESSAGES["en"]
+
+
+def test_cli_writes_utf8_with_legacy_stream_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "手稿 😀"
+    monkeypatch.setenv("OMM_HOME", str(home))
+    monkeypatch.setenv("OMM_SKILL_ROOT", str(home / "skill"))
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252:strict", "PYTHONUTF8": "0"}
+    command = [sys.executable, "-m", "omm.cli", "--lang", "zh-CN"]
+    paths = subprocess.run(
+        [*command, "paths", "--json"], env=env, capture_output=True, check=True, timeout=15
+    )
+    assert home.name.encode() in paths.stdout
+    assert Path(json.loads(paths.stdout)["omm_home"]).name == home.name
+
+    build = subprocess.run(
+        [*command, "build"], env=env, capture_output=True, check=False, timeout=15
+    )
+    assert build.returncode == 2
+    assert "子命令".encode() in build.stderr
 
 
 def test_i18n_catalog_covers_source_diagnostics() -> None:
@@ -80,7 +110,7 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_unimplemented_subcommand_returns_error_code(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = main(["--lang", "en", "console"])
+    rc = main(["--lang", "en", "build"])
     assert rc == 2
     assert "ERR_NOT_IMPLEMENTED" in capsys.readouterr().err
 

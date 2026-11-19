@@ -29,6 +29,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/omm"]
+artifacts = ["src/omm/_web_dist/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
