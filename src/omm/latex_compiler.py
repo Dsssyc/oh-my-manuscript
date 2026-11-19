@@ -299,9 +299,8 @@ def _render_inlines(
                 tokens.append(
                     _Tok(f"\\href{{{_escape_href(destination)}}}{{{inner}}}", atom=True)
                 )
-            case ast.Image(destination=destination):
-                path = _graphics_path(ctx, destination)
-                tokens.append(_Tok(f"\\includegraphics{{{path}}}", atom=True))
+            case ast.Image(alt=alt):
+                tokens.extend(_text_tokens(_escape(alt)))
             case ast.BlockRef(block_id=target):
                 number = _block_number(ctx, target)
                 label = _ref_text(number.label if number else target)
@@ -324,7 +323,7 @@ def _wrapped(
     ctx: _Ctx, node: ast.InlineContainer, command: str, quoted_source: str | None = None
 ) -> _Tok:
     children = tuple(_render_inlines(ctx, node.children, quoted_source=quoted_source))
-    return _Tok(command, atom=True, children=children)
+    return _Tok(command, children=children)
 
 
 def _citation_tokens(ctx: _Ctx, citation: ast.Citation) -> list[_Tok]:
@@ -389,7 +388,9 @@ def _plain(ctx: _Ctx, nodes: tuple[ast.Inline, ...]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _marked(tokens: Sequence[_Tok], *, deleted: bool, float_mode: bool) -> str:
+def _marked(
+    tokens: Sequence[_Tok], *, deleted: bool, float_mode: bool, boundaries: bool = True,
+) -> str:
     if not tokens:
         return ""
     begin = "\\DIFdelbegin" if deleted else "\\DIFaddbegin"
@@ -410,10 +411,15 @@ def _marked(tokens: Sequence[_Tok], *, deleted: bool, float_mode: bool) -> str:
         if token.structural:
             flush()
             pieces.append(token.text)
+        elif token.children is not None:
+            flush()
+            inner = _marked(token.children, deleted=deleted, float_mode=float_mode, boundaries=False)
+            pieces.append(f"{token.text}{{{inner}}}")
         else:
             run.append(f"\\mbox{{{token.latex}}}" if token.atom else token.latex)
     flush()
-    return f"{begin} " + "".join(pieces) + f"{end}{{}}"
+    content = "".join(pieces)
+    return f"{begin} {content}{end}{{}}" if boundaries else content
 
 
 def _diff_tokens(old: Sequence[_Tok], new: Sequence[_Tok], *, float_mode: bool) -> str:
@@ -530,7 +536,12 @@ def _render_paragraph(
     return f"{start}{_block_label(ctx, block.block_id)}{body}{end}"
 
 
-type _ListPart = str | list[_Tok]
+@dataclass(frozen=True, slots=True)
+class _ListLiteral:
+    latex: str
+
+
+type _ListPart = str | list[_Tok] | _ListLiteral
 
 
 def _list_parts(
@@ -573,27 +584,39 @@ def _list_parts(
             )
             inline = _render_inlines(ctx, nodes)
             if token.type == "heading_open":
-                inline = [_Tok(r"\textbf", atom=True, children=tuple(inline))]
+                inline = [_Tok(r"\textbf", children=tuple(inline))]
             parts.extend((inline, r"\par"))
             plain.append(_plain(ctx, nodes))
         elif token.type in {"fence", "code_block"}:
-            parts.append(_literal_code(token.content.rstrip("\n")))
+            parts.append(_ListLiteral(_literal_code(token.content.rstrip("\n"))))
             plain.append(token.content)
         elif token.type == "omm_display":
-            parts.append(f"\\[{token.content}\n\\]")
+            parts.append(_ListLiteral(f"\\[{token.content}\n\\]"))
             plain.append(token.content)
         elif token.type == "hr":
             parts.append(r"\noindent\rule{\linewidth}{0.4pt}")
     return parts, plain, item_starts
 
 
+def _mark_list_literal(part: _ListLiteral, *, deleted: bool) -> str:
+    command = r"\DIFdel" if deleted else r"\DIFadd"
+    return f"{command}begin\n{part.latex}\n{command}end"
+
+
 def _render_list_parts(
     parts: Sequence[_ListPart], *, deleted: bool = False, inserted: bool = False,
+    deleted_enumerated_items: Collection[int] = (),
 ) -> str:
     rendered_parts = []
-    for part in parts:
+    for index, part in enumerate(parts):
         if isinstance(part, str):
+            if index in deleted_enumerated_items:
+                part += r"\addtocounter{enumi}{-1}"
             rendered_parts.append(part)
+        elif isinstance(part, _ListLiteral):
+            rendered_parts.append(
+                _mark_list_literal(part, deleted=deleted) if deleted or inserted else part.latex
+            )
         elif deleted or inserted:
             rendered_parts.append(_marked(part, deleted=deleted, float_mode=False))
         else:
@@ -604,8 +627,11 @@ def _render_list_parts(
 def _render_list(
     ctx: _Ctx, block: ast.ListBlock, *, deleted: bool, inserted: bool = False
 ) -> str:
-    parts, plain, _ = _list_parts(ctx, block)
-    rendered = _render_list_parts(parts, deleted=deleted, inserted=inserted)
+    parts, plain, starts = _list_parts(ctx, block)
+    deleted_items = set(starts) if deleted and starts and parts[0] == r"\begin{enumerate}" else ()
+    rendered = _render_list_parts(
+        parts, deleted=deleted, inserted=inserted, deleted_enumerated_items=deleted_items,
+    )
     if deleted:
         return rendered
     _record(ctx, block, "list", " ".join(" ".join(plain).split()))
@@ -979,6 +1005,27 @@ def _render_marked_pair(old: _Ctx, old_block: ast.Block, ctx: _Ctx, block: ast.B
             return _render_replacement(old, old_block, ctx, block)
 
 
+def _diff_list_item(old: Sequence[_ListPart], new: Sequence[_ListPart]) -> str | None:
+    if len(old) != len(new):
+        return None
+    rendered = []
+    for before, after in zip(old, new):
+        if isinstance(before, list) and isinstance(after, list):
+            rendered.append(_diff_tokens(before, after, float_mode=False))
+        elif isinstance(before, _ListLiteral) and isinstance(after, _ListLiteral):
+            if before == after:
+                rendered.append(after.latex)
+            else:
+                rendered.extend((
+                    _mark_list_literal(before, deleted=True), _mark_list_literal(after, deleted=False)
+                ))
+        elif isinstance(before, str) and before == after:
+            rendered.append(before)
+        else:
+            return None
+    return "\n".join(rendered)
+
+
 def _render_marked_list(
     old: _Ctx, old_block: ast.ListBlock, ctx: _Ctx, block: ast.ListBlock
 ) -> str:
@@ -990,13 +1037,25 @@ def _render_marked_list(
     old_items = [old_parts[a:b] for a, b in zip(old_starts, [*old_starts[1:], len(old_parts) - 1])]
     new_items = [new_parts[a:b] for a, b in zip(new_starts, [*new_starts[1:], len(new_parts) - 1])]
     rendered = [_render_list_parts(new_parts[:new_starts[0]])]
+    deleted_enumerated_items = (0,) if new_parts[0] == r"\begin{enumerate}" else ()
     old_keys = [_render_list_parts(item) for item in old_items]
     new_keys = [_render_list_parts(item) for item in new_items]
     for op, i, j, k, last in SequenceMatcher(None, old_keys, new_keys, autojunk=False).get_opcodes():
         if op == "equal":
             rendered.extend(new_keys[k:last])
+            continue
+        if op == "replace" and j - i == last - k:
+            paired = [
+                _diff_list_item(before, after) for before, after in zip(old_items[i:j], new_items[k:last])
+            ]
+            if None not in paired:
+                rendered.extend(item for item in paired if item is not None)
+                continue
         if op in {"delete", "replace"}:
-            rendered.extend(_render_list_parts(item, deleted=True) for item in old_items[i:j])
+            rendered.extend(
+                _render_list_parts(item, deleted=True, deleted_enumerated_items=deleted_enumerated_items)
+                for item in old_items[i:j]
+            )
         if op in {"insert", "replace"}:
             rendered.extend(_render_list_parts(item, inserted=True) for item in new_items[k:last])
     closing = new_parts[-1]
@@ -1282,11 +1341,6 @@ def _referenced_assets(snapshot: RevisionSnapshot, sources: Sequence[str]) -> se
         for block in ast.walk_blocks(snapshot.documents[source].blocks):
             if isinstance(block, ast.Subfigure):
                 assets.add(block.asset_path)
-            inlines = block.comment.inlines if isinstance(block, ast.ReviewItem) else block.inlines
-            assets.update(
-                node.destination for node in ast.walk_inlines(inlines)
-                if isinstance(node, ast.Image) and node.destination in snapshot.assets
-            )
     return assets
 
 
@@ -1450,9 +1504,8 @@ def compile_latex_workspace(
                 lineno=False,
                 record=False,
                 loc_labels={},
-                local_blocks=(
-                    _labeled_blocks(milestone, old_deliverable.sources)
-                    if old_deliverable.kind != "response_letter" else frozenset()
+                local_blocks=_labeled_blocks(milestone, old_deliverable.sources).intersection(
+                    ctx.local_blocks
                 ),
                 local_citations=frozenset(old_keys).intersection(keys),
                 asset_alias=alias,

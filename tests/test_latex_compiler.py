@@ -714,10 +714,72 @@ def test_marked_word_boundaries_and_balanced_format_changes(repo, tmp_path):
     artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
     marked = artifact.marked_path.read_text(encoding="utf-8")
     assert r"\DIFaddend{}two" in marked
-    assert r"\DIFdel{\mbox{\textbf{bold}}}" in marked
-    assert r"\DIFadd{\mbox{\emph{bold}}}" in marked
+    assert r"\textbf{\DIFdel{bold}}" in marked
+    assert r"\emph{\DIFadd{bold}}" in marked
     assert r"\textbf{same \DIFdelbegin \DIFdel{command}" in marked
     assert brace_balance(marked) == 0
+
+
+def test_marked_long_format_changes_allow_line_breaks(repo, tmp_path):
+    bold = " ".join(f"word{index}" for index in range(60))
+    italic = " ".join(f"term{index}" for index in range(60))
+    old, new = two_revisions(
+        repo, {INTRO: f"*{italic}* {{#p-format}}\n"}, {INTRO: f"**{bold}** {{#p-format}}\n"},
+    )
+    artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
+    marked = artifact.marked_path.read_text(encoding="utf-8")
+    assert r"\textbf{\DIFadd{" + bold + "}}" in marked
+    assert r"\emph{\DIFdel{" + italic + "}}" in marked
+    assert r"\mbox{" not in marked
+    assert brace_balance(marked) == 0
+
+
+def test_marked_deleted_reference_has_no_dangling_link(repo, tmp_path):
+    old, new = two_revisions(
+        repo,
+        {INTRO: "# Methods {#sec-old}\n\nSee [#sec-old] for details. {#p-ref}\n"},
+        {INTRO: "See the new protocol. {#p-ref}\n"},
+    )
+    artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
+    marked = artifact.marked_path.read_text(encoding="utf-8")
+    assert r"\hyperref[omm:sec-old]" not in marked
+    assert any("Section~1" in region for region in dif_regions(marked, deleted=True))
+
+
+def test_marked_ordered_list_diffs_code_inside_one_item(repo, tmp_path):
+    def source(code):
+        return (
+            f"1. Step\n\n   ~~~python\n   {code}()\n   ~~~\n\n"
+            "2. Finish. {#li-steps}\n"
+        )
+
+    old, new = two_revisions(repo, {INTRO: source("alpha")}, {INTRO: source("beta")})
+    artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
+    marked = artifact.marked_path.read_text(encoding="utf-8")
+    assert marked.count("\\item\n") == 2
+    assert "\\item\nStep\n\\par\n\\DIFdelbegin\n\\begin{verbatim}\nalpha()\n" in marked
+    assert "\\end{verbatim}\n\\DIFdelend\n\\DIFaddbegin\n\\begin{verbatim}\nbeta()\n" in marked
+    assert "\\end{verbatim}\n\\DIFaddend\n\\item\nFinish.\n" in marked
+
+
+@pytest.mark.parametrize("deleted", [True, False])
+def test_marked_ordered_item_marks_code_and_math(repo, tmp_path, deleted):
+    with_step = (
+        "1. Start.\n"
+        "2. Extra step.\n\n   ~~~python\n   alpha()\n   ~~~\n\n"
+        "   $$\n   x = 1\n   $$\n\n"
+        "3. Finish. {#li-steps}\n"
+    )
+    without_step = "1. Start.\n2. Finish. {#li-steps}\n"
+    before, after = (with_step, without_step) if deleted else (without_step, with_step)
+    old, new = two_revisions(repo, {INTRO: before}, {INTRO: after})
+    artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
+    marked = artifact.marked_path.read_text(encoding="utf-8")
+    assert (r"\item\addtocounter{enumi}{-1}" in marked) == deleted
+    dif = "\\DIFdel" if deleted else "\\DIFadd"
+    assert f"{dif}begin\n\\begin{{verbatim}}\nalpha()\n\\end{{verbatim}}\n{dif}end\n" in marked
+    assert re.search(re.escape(dif + "begin\n\\[") + r"\s*x = 1\s*" + re.escape(r"\]"), marked)
+    assert f"\\]\n{dif}end\n\\item\nFinish.\n" in marked
 
 
 def test_marked_inserted_content_and_changed_panel_caption(repo, tmp_path):
@@ -760,7 +822,7 @@ def test_marked_inserted_content_and_changed_panel_caption(repo, tmp_path):
     assert brace_balance(marked) == 0
 
 
-def test_shared_new_asset_wins_over_deleted_figure_and_inline_images_are_exported(repo, tmp_path):
+def test_shared_new_asset_wins_over_deleted_figure(repo, tmp_path):
     def figure(name):
         return f":::{{figure}} {{#fig-{name}}}\n![Map](figures/map.png)\n\nMap.\n:::\n"
 
@@ -770,22 +832,40 @@ def test_shared_new_asset_wins_over_deleted_figure_and_inline_images_are_exporte
         {"figures/map.png": b"milestone"},
     )
     old = snapshot_at(repo, publish(repo))
-    write(repo, INTRO, "Inline ![Map](figures/map.png). {#p-image}\n")
+    write(repo, INTRO, figure("main"))
     write(repo, APPENDIX, "Removed map. {#p-no-map}\n")
+    write_asset(repo, "figures/map.png", b"current")
     new = snapshot_at(repo, publish(repo))
-    # Model an inline asset already present in the revision snapshot.
-    new = replace(new, assets={"figures/map.png": b"current"})
     out_dir = tmp_path / "build"
     artifacts = compile_latex_workspace(new, out_dir, milestone=old)
     path = out_dir / "figures/map.png"
     assert path in artifacts["main"].asset_paths
     assert path.read_bytes() == b"current"
-    assert r"\includegraphics{figures/map.png}" in artifacts["main"].clean_path.read_text()
+    assert r"\includegraphics[width=\linewidth]{figures/map.png}" in (
+        artifacts["main"].clean_path.read_text(encoding="utf-8")
+    )
     [archived] = artifacts["appendix"].clean_path.parent.glob("figures/.omm_old_*_map.png")
     assert archived.read_bytes() == b"milestone"
     assert archived in artifacts["appendix"].asset_paths
     marked = artifacts["appendix"].marked_path.read_text(encoding="utf-8")
     assert f"figures/{archived.name}" in marked
+
+
+def test_inline_images_render_alt_text_without_exporting_assets(repo, tmp_path):
+    stage(
+        repo, manifest({"main": ("manuscript", [INTRO]), "appendix": ("supplementary", [APPENDIX])}),
+        {
+            "references.bib": "",
+            INTRO: "Inline ![Map & legend](figures/map.png) and ![Key](missing.png). {#p-image}\n",
+            APPENDIX: ":::{figure} {#fig-map}\n![Map](figures/map.png)\n\nMap.\n:::\n",
+        },
+        {"figures/map.png": b"managed figure"},
+    )
+    artifact = compile_out(repo, tmp_path, publish(repo))["main"]
+    clean = artifact.clean_path.read_text(encoding="utf-8")
+    assert r"Inline Map \& legend and Key." in clean
+    assert r"\includegraphics" not in clean
+    assert not artifact.asset_paths
 
 
 def test_clean_deep_headings_quoted_lists_and_literal_closers(repo, tmp_path):

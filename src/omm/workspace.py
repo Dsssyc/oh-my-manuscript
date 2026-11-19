@@ -289,10 +289,11 @@ def load_workspace(root: Path) -> Workspace:
         device = folded.split(".", 1)[0].rstrip(" ")
         if (
             folded in names
-            or any(part in name for part in ("/", "\\", "..", ":"))
+            or ".." in name
+            or any(char in name for char in '<>:"/\\|?*=')
             or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in name)
             or name.endswith((".", " "))
-            or re.fullmatch(r"con|prn|aux|nul|(?:com|lpt)[1-9]", device)
+            or re.fullmatch(r"con|prn|aux|nul|conin\$|conout\$|clock\$|(?:com|lpt)[1-9\xb2\xb3\xb9]", device)
         ):
             raise OmmError("ERR_MANIFEST_INVALID", path=path, field=field)
         names.add(folded)

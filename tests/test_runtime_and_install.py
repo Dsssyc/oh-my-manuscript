@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import ntpath
@@ -142,6 +143,25 @@ def test_install_and_launch_stable_runtime(isolated: Path, monkeypatch: pytest.M
     assert not list(package.parent.glob("*editable*"))
     assert not (package.parent / "pytest").exists()
     assert (package.parent / "mdurl").is_dir()
+    hook = (package.parent / "_omm.pth").read_text(encoding="utf-8").splitlines()
+    assert len(hook) == 1 and hook[0].startswith("import ")
+    [record] = package.parent.glob("oh_my_manuscript-*.dist-info/RECORD")
+    with record.open(encoding="utf-8", newline="") as stream:
+        assert "_omm.pth" in {row[0] for row in csv.reader(stream)}
+    paths = [r"C:\runtime\site-packages", r"\\server\share\venv", r"\\?\C:\already", "relative", ""]
+    invalidations = []
+    modules = {
+        "os": SimpleNamespace(name="nt", path=ntpath),
+        "sys": SimpleNamespace(path=paths),
+        "importlib": SimpleNamespace(invalidate_caches=lambda: invalidations.append(True)),
+    }
+    # Execute the generated startup hook with isolated imports and a Windows path module.
+    exec(hook[0], {"__builtins__": {"__import__": lambda name, *_: modules[name]}})  # noqa: S102
+    assert paths == [
+        r"\\?\C:\runtime\site-packages", r"\\?\UNC\server\share\venv",
+        r"\\?\C:\already", "relative", "",
+    ]
+    assert invalidations == [True]
     assert _cli("paths", "--json", launcher=launcher)["skill_root"] == str(skill)
     health = _cli("health", "--json", launcher=launcher)
     assert health["status"] == "unavailable" and health["source_leak"] is False
@@ -189,6 +209,14 @@ def test_install_and_reuse_deep_runtime_with_utf8(isolated, monkeypatch):
             "iso_dsdl_include.xsl",
         )
         assert len(str(resource)) > 280 and fs_path(resource).is_file()
+        if os.name == "nt":
+            package = resource.parents[4]
+            [extension] = fs_path(package).glob("etree*.pyd")
+            assert len(str(package / extension.name)) > 260
+            subprocess.run(
+                [inspected["python"], "-I", "-c", "import lxml.etree"],
+                check=True, capture_output=True, timeout=15, creationflags=_NO_WINDOW,
+            )
         ready_file = fs_path(directory / "READY.json")
         ready = _read(ready_file)
         assert _read(fs_path(runtime_root / "active-runtime.json")) == ready

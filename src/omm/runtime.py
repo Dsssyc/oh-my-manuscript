@@ -376,10 +376,20 @@ def _write_project_metadata(site: Path, project: metadata.Distribution, files: l
     fs_path(info).mkdir()
     atomic_write_text(info / "METADATA", project.metadata.as_string())
     atomic_write_text(info / "INSTALLER", "omm\n")
+    # FileFinder needs extended-length search paths before importing native modules.
+    hook = (
+        'import importlib, os, sys; sys.path[:] = ['
+        r'("\\\\?\\UNC\\" + p[2:] if p.startswith("\\\\") else "\\\\?\\" + p) '
+        r'if (os.name == "nt" and p and os.path.isabs(p) and not p.startswith("\\\\?\\")) '
+        'else p for p in sys.path]; importlib.invalidate_caches()'
+    )
+    pth = Path("_omm.pth")
+    atomic_write_text(site / pth, hook + "\n")
     record = io.StringIO()
     writer = csv.writer(record, lineterminator="\n")
     for relative in [
         *(Path("omm") / p for p in files),
+        pth,
         info.relative_to(site) / "METADATA",
         info.relative_to(site) / "INSTALLER",
     ]:

@@ -16,6 +16,7 @@ from lxml import etree
 from omm import ast
 from omm.bib import BibEntry
 from omm.docx_compiler import (
+    _visible_text,
     accept_docx_revisions,
     compile_docx_workspace,
     reject_docx_revisions,
@@ -49,6 +50,30 @@ def _read(package: Path, part: str = "word/document.xml") -> etree._Element:
 def _parts(package: Path) -> dict[str, bytes]:
     with ZipFile(package) as archive:
         return {name: archive.read(name) for name in archive.namelist()}
+
+
+def test_visible_text_reads_radicals_and_nary_operators():
+    equation = etree.fromstring(f"""
+        <m:oMath xmlns:m="{NS['m']}" xmlns:w="{NS['w']}">
+          <m:rad>
+            <m:radPr><m:degHide m:val="1"/></m:radPr>
+            <m:deg><m:r><m:t>2</m:t></m:r></m:deg>
+            <m:e><m:r><m:t>x</m:t></m:r></m:e>
+          </m:rad>
+          <m:nary>
+            <m:sub><m:r><m:t>0</m:t></m:r></m:sub>
+            <m:sup><m:r><m:t>1</m:t></m:r></m:sup>
+            <m:e><m:r><m:t>y</m:t></m:r></m:e>
+          </m:nary>
+          <m:nary>
+            <m:naryPr><m:chr w:val="∑"/></m:naryPr>
+            <m:sub><m:r><m:t>i</m:t></m:r></m:sub>
+            <m:sup><m:r><m:t>n</m:t></m:r></m:sup>
+            <m:e><m:r><m:t>z</m:t></m:r></m:e>
+          </m:nary>
+        </m:oMath>
+    """)
+    assert _visible_text(equation) == "√x∫01y∑inz"
 
 
 def _snapshot(

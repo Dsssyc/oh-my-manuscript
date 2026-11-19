@@ -21,7 +21,7 @@ from omm.git_revs import (
 from omm.latex_compiler import CompiledLatexDeliverable, compile_latex_workspace
 from omm.loc_resolver import resolve_blocks_from_pdf, resolve_workspace_locations
 from omm.numbering import number_workspace
-from omm.workspace import _replace_file, resolve_path
+from omm.workspace import _replace_file, fs_path, resolve_path
 
 Target = Literal["docx", "latex"]
 _COMPILERS = {"docx": compile_docx_workspace, "latex": compile_latex_workspace}
@@ -69,6 +69,26 @@ def _load_snapshot(root: Path, revision: str) -> RevisionSnapshot:
     return snapshot
 
 
+def _workspace_output_parts(
+    directory: Path, root: Path, *, reject_ancestors: bool = False,
+) -> tuple[str, ...] | None:
+    """Find workspace-relative parts, with an empty tuple for protected directories."""
+    probe = directory
+    while not fs_path(probe).exists():
+        if probe == probe.parent:
+            return None
+        probe = probe.parent
+    tail = directory.relative_to(probe).parts
+    if reject_ancestors and not tail and any(
+        fs_path(probe).samefile(fs_path(parent)) for parent in root.parents
+    ):
+        return ()
+    for ancestor in (probe, *probe.parents):
+        if fs_path(ancestor).samefile(fs_path(root)):
+            return (*probe.relative_to(ancestor).parts, *tail)
+    return None
+
+
 def build_workspace(
     root: Path,
     *,
@@ -96,15 +116,23 @@ def build_workspace(
     numbered = number_workspace(snapshot)
     targets: tuple[Target, ...] = ("docx", "latex") if target == "all" else (target,)
     layouts = layout_pdfs or {}
-    final_dir = resolve_path(out_dir or snapshot.workspace.resolve(".omm/build"))
+    requested_dir = out_dir or snapshot.workspace.resolve(".omm/build")
+    final_dir = resolve_path(requested_dir)
     workspace_root = snapshot.workspace.root
     metadata_dir = workspace_root / ".omm"
+    parts = _workspace_output_parts(final_dir, workspace_root, reject_ancestors=True)
+    # Windows resolution can replace the spelling of .omm with its on-disk case.
+    requested_parts = (
+        _workspace_output_parts(Path(os.path.abspath(requested_dir)), workspace_root)
+        if os.name == "nt" and parts else None
+    )
     if (
         final_dir == resolve_path(metadata_dir)
-        or workspace_root.is_relative_to(final_dir)
+        or (parts is not None and (len(parts) < 2 or parts[0] != ".omm"))
         or (
-            final_dir.is_relative_to(workspace_root)
-            and not final_dir.is_relative_to(metadata_dir)
+            requested_parts
+            and requested_parts[0].casefold() == ".omm"
+            and requested_parts[0] != ".omm"
         )
     ):
         raise OmmError("ERR_WORKSPACE_PATH_INVALID", path=final_dir, value=str(final_dir))

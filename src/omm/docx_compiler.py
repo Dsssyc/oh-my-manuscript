@@ -194,16 +194,28 @@ def _paragraph(style: str = "Normal", *, align: str | None = None) -> etree._Ele
     return paragraph
 
 
-def _visible_text(node: etree._Element) -> str:
-    text = (_W + "t", _M + "t")
-    controls = {_W + "tab": "\t", _W + "br": "\n"}
-    values = []
-    for item in node.iter(*text, *controls):
-        if item.tag in text:
-            values.append(item.text or "")
-        elif item.getparent().tag == _W + "r":
-            values.append(controls[item.tag])
-    return "".join(values)
+def _visible_text(node: etree._Element | None) -> str:
+    if node is None:
+        return ""
+    if node.tag in (_W + "t", _M + "t"):
+        return node.text or ""
+    if node.tag in (_W + "tab", _W + "br"):
+        parent = node.getparent()
+        if parent is not None and parent.tag == _W + "r":
+            return "\t" if node.tag == _W + "tab" else "\n"
+        return ""
+    if node.tag == _M + "rad":
+        hide = node.find(f"{_M}radPr/{_M}degHide")
+        degree = (
+            "" if hide is not None and hide.get(_M + "val") in {"1", "true", "on"}
+            else _visible_text(node.find(_M + "deg"))
+        )
+        return degree + "√" + _visible_text(node.find(_M + "e"))
+    if node.tag == _M + "nary":
+        char = node.find(f"{_M}naryPr/{_M}chr")
+        operator = char.get(_M + "val", char.get(_W + "val", "∫")) if char is not None else "∫"
+        return operator + "".join(_visible_text(node.find(_M + part)) for part in ("sub", "sup", "e"))
+    return "".join(_visible_text(child) for child in node)
 
 
 class _Bookmarks:

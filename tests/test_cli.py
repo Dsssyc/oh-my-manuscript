@@ -258,6 +258,7 @@ def test_build_accepts_unqualified_pdf_for_one_target(cli_workspace, monkeypatch
 @pytest.mark.parametrize("name", [
     "sub/paper", "sub\\paper", "paper..draft", "paper:copy", "paper\tname", "paper\x7fname",
     "paper.", "paper ", "CON", "prn.v2", "AUX", "NuL.pdf", "com8", "LPT9.draft",
+    "draft?", "COM¹", "CONOUT$", "CONIN$", "CLOCK$", "LPT².v2", "main=rev",
 ])
 def test_manifest_rejects_unsafe_deliverable_name(cli_workspace, name):
     assert main(["init", "--cwd", str(cli_workspace)]) == 0
@@ -279,6 +280,16 @@ def test_manifest_rejects_casefold_duplicate_deliverable_names(cli_workspace):
     ), encoding="utf-8")
     with pytest.raises(OmmError, match="ERR_MANIFEST_INVALID"):
         load_workspace(cli_workspace)
+
+
+def test_manifest_allows_unicode_deliverable_name(cli_workspace):
+    assert main(["init", "--cwd", str(cli_workspace)]) == 0
+    manifest = cli_workspace / "manuscript.toml"
+    text = manifest.read_text(encoding="utf-8")
+    manifest.write_text(
+        text.replace("[deliverables.manuscript]", '[deliverables."修订稿 β"]'), encoding="utf-8"
+    )
+    assert list(load_workspace(cli_workspace).deliverables) == ["修订稿 β"]
 
 
 def test_build_only_produces_clean_without_a_milestone(

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import groupby, pairwise
 from math import hypot
@@ -79,7 +79,6 @@ _NUMBER_COLUMN_WIDTH = 24  # Accommodates right-aligned labels with differing di
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
 _EQUATION_NUMBER = re.compile(r"\([A-Za-z]*[0-9]+\)")
 _MATH_DELIMITERS = frozenset("()[]{}|‖⟨⟩")
-_MATH_STRUCTURE = _MATH_DELIMITERS | frozenset("√∛∜∑∏∫∬∭∮⋃⋂")
 _LIST_MARKER = re.compile(r"^(?:[•◦▪●‣∙\uf0b7–-]|[0-9]+[.)])(?:\s+|$)")
 
 
@@ -104,7 +103,8 @@ class _VisualLine:
 
 
 def _normalize(text: str) -> str:
-    return " ".join(unicodedata.normalize("NFKC", text).replace("\u00ad", "").split())
+    normalized = unicodedata.normalize("NFKC", text).replace("\u00ad", "")
+    return " ".join(normalized.replace("∛", "3√").replace("∜", "4√").split())
 
 
 def _separate_positioned_text(page: PageObject) -> None:
@@ -352,7 +352,7 @@ def _math_order_matches(actual: str, expected: str) -> bool:
     for character in actual:
         if position < len(expected) and character == expected[position]:
             position += 1
-        elif character not in _MATH_STRUCTURE:
+        elif character not in _MATH_DELIMITERS:
             return False
     return position == len(expected)
 
@@ -386,8 +386,8 @@ def _match_equation(
             parts = parts[:-1]
         text = _math_chars("".join(parts))
         observed.update(text)
-        # OMML can encode delimiters, radicals and operators outside its text runs.
-        if (observed - expected.characters).keys() - _MATH_STRUCTURE:
+        # OMML can encode delimiters outside its text runs.
+        if (observed - expected.characters).keys() - _MATH_DELIMITERS:
             break
         if found_number and expected.characters <= observed:
             # A flat equation can also be checked in left-to-right order.
@@ -401,14 +401,26 @@ def _match_equation(
     return ()
 
 
+def _block_matches(
+    lines: list[_VisualLine], block: BlockRecordLike, expected: str,
+) -> list[tuple[int, ...]]:
+    if block.kind == "display_math":
+        equation = _EquationText.from_record(block.plain_text)
+        return [
+            match for index in range(len(lines)) if (match := _match_equation(lines, index, equation))
+        ]
+    return [
+        match for index in range(len(lines))
+        if (match := _match_lines(lines, index, expected, block.kind))
+    ]
+
+
 def _align_block(
     lines: list[_VisualLine],
-    cursor: int,
+    feasible: Iterable[tuple[int, ...]],
     block: BlockRecordLike,
     anchors: dict[str, tuple[int, float | None]],
 ) -> tuple[int, ...]:
-    expected = _normalize(block.plain_text)
-    equation = _EquationText.from_record(block.plain_text) if block.kind == "display_math" else None
     start = anchors.get(getattr(block, "start_bookmark", None))
     end = anchors.get(getattr(block, "end_bookmark", None))
     if start is None:
@@ -418,22 +430,15 @@ def _align_block(
     unnumbered = ()
     best = ()
     best_distance = (float("inf"), float("inf"))
-    for index in range(cursor, len(lines)):
-        matched = (
-            _match_equation(lines, index, equation)
-            if equation is not None
-            else _match_lines(lines, index, expected, block.kind)
-        )
-        if not matched:
-            continue
+    for matched in feasible:
         if start is None and end is None:
             numbered = (lines[i].number is not None for i in matched)
-            if (any(numbered) if equation is not None else all(numbered)):
+            if (any(numbered) if block.kind == "display_math" else all(numbered)):
                 return matched
             if not unnumbered:
                 unnumbered = matched
             continue
-        endpoints = ((lines[index], start), (lines[matched[-1]], end))
+        endpoints = ((lines[matched[0]], start), (lines[matched[-1]], end))
         distance = (
             sum(abs(line.page - anchor[0]) for line, anchor in endpoints if anchor),
             sum(
@@ -468,18 +473,36 @@ def resolve_blocks_from_pdf(
         # pypdf also raises built-in exceptions for some malformed PDF objects.
         raise OmmError("ERR_LAYOUT_PDF_INVALID", deliverable=deliverable, detail=str(exc)) from exc
 
+    def unmatched(block: BlockRecordLike) -> OmmError:
+        return OmmError(
+            "ERR_LAYOUT_PDF_INVALID",
+            deliverable=deliverable,
+            detail=f"Could not match the text of block {block.block_id}.",
+        )
+
+    candidates = []
+    for block in blocks:
+        if expected := _normalize(block.plain_text):
+            matches = _block_matches(lines, block, expected)
+            if not matches:
+                raise unmatched(block)
+            candidates.append((block, matches))
+
+    # Reserve enough room for every remaining block before preferring numbered lines or anchors.
+    limits = [len(lines) - 1] * len(candidates)
+    for index in range(len(candidates) - 2, -1, -1):
+        next_matches = candidates[index + 1][1]
+        limits[index] = max(
+            (match[0] for match in next_matches if match[-1] <= limits[index + 1]), default=-1
+        ) - 1
+
     spans = {}
     cursor = 0
-    for block in blocks:
-        if not _normalize(block.plain_text):
-            continue
-        indices = _align_block(lines, cursor, block, anchors)
+    for (block, matches), limit in zip(candidates, limits):
+        feasible = (match for match in matches if cursor <= match[0] and match[-1] <= limit)
+        indices = _align_block(lines, feasible, block, anchors)
         if not indices:
-            raise OmmError(
-                "ERR_LAYOUT_PDF_INVALID",
-                deliverable=deliverable,
-                detail=f"Could not match the text of block {block.block_id}.",
-            )
+            raise unmatched(block)
         cursor = indices[-1] + 1
         segments = []
         for page, group in groupby((lines[i] for i in indices), key=lambda line: line.page):

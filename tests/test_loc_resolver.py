@@ -21,6 +21,7 @@ from omm import loc_resolver
 from omm.docx_compiler import DocxBlockRecord, compile_docx_workspace
 from omm.errors import OmmError
 from omm.git_revs import RevisionSnapshot
+from omm.latex_compiler import compile_latex_workspace
 from omm.loc_resolver import (
     LineSpan,
     format_location_label,
@@ -215,6 +216,18 @@ def test_pdf_named_destination_disambiguates_matching_text(tmp_path):
     ) == {"p-repeated": LineSpan(1, 106, 1, 106, ((1, 106, 106),))}
 
 
+def test_pdf_repeated_text_keeps_a_match_for_each_block(tmp_path):
+    pdf = _pdf(tmp_path / "layout.pdf", [[
+        (75, 720, "Same text."),
+        (42, 700, "7"), (75, 700, "Same text."),
+    ]])
+    first = _record("p-one", "Same text.")
+    second = _record("p-two", "Same text.")
+    span = LineSpan(1, 7, 1, 7, ((1, 7, 7),))
+    assert resolve_blocks_from_pdf(pdf, [first], deliverable="main") == {"p-one": span}
+    assert resolve_blocks_from_pdf(pdf, [first, second], deliverable="main") == {"p-two": span}
+
+
 @pytest.mark.parametrize("hyphen", ["-", "‐"])
 def test_pdf_prefers_numbered_heading_and_matches_discretionary_hyphens(tmp_path, hyphen):
     pdf = _pdf(tmp_path / "layout.pdf", [[
@@ -347,6 +360,43 @@ def _snapshot(tmp_path, manuscript, reply="", *, supplementary=""):
 
 def _no_engine(*args, **kwargs):
     pytest.fail("No layout command was expected.")
+
+
+@pytest.mark.parametrize("target", ["docx", "latex"])
+@pytest.mark.parametrize(
+    ("source", "printed", "plain"),
+    [(r"\sqrt{x}", "√x", "√x"), (r"\sqrt[3]{x}", "∛x", "3√x"),
+     (r"\sqrt[4]{x}", "∜x", "4√x")],
+)
+def test_pdf_locates_inline_radicals(tmp_path, target, source, printed, plain):
+    snapshot = _snapshot(tmp_path, f"Flux is ${source}$. {{#p-flux}}\n")
+    output = tmp_path / "build"
+    if target == "docx":
+        clean = compile_docx_workspace(snapshot, output, deliverables=["main"])["main"]
+    else:
+        clean = compile_latex_workspace(snapshot, output, pdf_deliverables=["main"])["main"]
+    assert clean.blocks[0].plain_text == f"Flux is {plain}."
+    pdf = _pdf(tmp_path / "layout.pdf", [[(42, 700, "7"), (75, 700, f"Flux is {printed}.")]])
+    assert resolve_blocks_from_pdf(pdf, clean.blocks, deliverable="main") == {
+        "p-flux": LineSpan(1, 7, 1, 7, ((1, 7, 7),))
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "printed"),
+    [
+        ("x", "√x"), (r"\sqrt{x}", "x"),
+        ("y", "∑y"), (r"\sum y", "y"),
+        ("z", "∫z"), (r"\int z", "z"),
+    ],
+)
+def test_pdf_rejects_display_equations_with_different_operators(tmp_path, source, printed):
+    snapshot = _snapshot(tmp_path, f"$$\n{source}\n$$ {{#eq-1}}\n")
+    clean = compile_docx_workspace(snapshot, tmp_path / "build", deliverables=["main"])["main"]
+    pdf = _pdf(tmp_path / "layout.pdf", [[(42, 700, "7"), (200, 700, printed), (526, 700, "(1)")]])
+    with pytest.raises(OmmError, match="ERR_LAYOUT_PDF_INVALID") as caught:
+        resolve_blocks_from_pdf(pdf, clean.blocks, deliverable="main")
+    assert caught.value.diagnostic.params["detail"] == "Could not match the text of block eq-1."
 
 
 @pytest.mark.parametrize("shared_text_object", [False, True])

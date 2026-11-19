@@ -368,6 +368,24 @@ def test_build_rejects_workspace_source_directories(workspace, monkeypatch):
     assert (root / ".omm/submission/figures/map.png").read_bytes() == b"published image"
 
 
+def test_build_rejects_case_aliases_of_workspace_output_paths(workspace):
+    root, run = workspace
+    alias = root.with_name(root.name.upper())
+    if not alias.exists() or not alias.samefile(root):
+        pytest.skip("Requires a case-insensitive filesystem.")
+    _write(root, INTRO, "Introduction. {#p-intro}\n")
+    revision = _publish(run)
+    (root / ".omm" / "Existing").mkdir()
+    for out_dir in (alias, alias / "new" / "child", alias / "SECTIONS",
+                    alias / "SECTIONS" / "new", root / ".OMM" / "Existing",
+                    root / ".OMM" / "new"):
+        error = run("build", "--target", "latex", "--revision", revision,
+                    "--out-dir", str(out_dir), expected=1)
+        assert "ERR_WORKSPACE_PATH_INVALID" in error.err
+    run("build", "--target", "latex", "--revision", revision,
+        "--out-dir", str(alias / ".omm" / "new"))
+
+
 def test_build_selects_latest_ancestral_submission(workspace):
     root, run = workspace
     _write(root, INTRO, "First submission. {#p-intro}\n")
