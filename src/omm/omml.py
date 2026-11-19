@@ -365,12 +365,14 @@ def _run(
     run = _frag("r")
     if scr is not None or sty is not None or nor or aln:
         rpr = _sub(run, "rPr")
-        if scr is not None:
-            _sub(rpr, "scr").set(_M + "val", scr)
-        if sty is not None:
-            _sub(rpr, "sty").set(_M + "val", sty)
+        # CT_RPR chooses between normal text and math script/style.
         if nor:
             _sub(rpr, "nor")
+        else:
+            if scr is not None:
+                _sub(rpr, "scr").set(_M + "val", scr)
+            if sty is not None:
+                _sub(rpr, "sty").set(_M + "val", sty)
         if aln:
             _sub(rpr, "aln")
     t = _sub(run, "t")
@@ -916,7 +918,7 @@ def _convert_node(
         return [] if not text else [_run(text, sty="p")]
     if tag == "mtext":
         text = node.text or ""
-        return [] if not text else [_run(text, sty="p", nor=True)]
+        return [] if not text else [_run(text, nor=True)]
     if tag == "mspace":
         if node.get("linebreak") == "newline":
             raise _err(
