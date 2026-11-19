@@ -16,6 +16,7 @@ dependencies = [
     "markdown-it-py>=4.0.0",
     "platformdirs>=4.3.0",
     "portalocker>=4.0.0",
+    "pypdf>=7.1.0",
 ]
 
 [project.scripts]

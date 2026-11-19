@@ -51,6 +51,7 @@ import latex2mathml.converter
 import markdown_it
 import platformdirs
 import portalocker
+import pypdf
 
 root = Path(sys.argv[1]).resolve()
 assert Path(sys.prefix).resolve() == root / "venv"
