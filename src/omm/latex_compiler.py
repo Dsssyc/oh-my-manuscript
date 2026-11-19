@@ -599,8 +599,8 @@ def _list_parts(
 
 
 def _mark_list_literal(part: _ListLiteral, *, deleted: bool) -> str:
-    command = r"\DIFdel" if deleted else r"\DIFadd"
-    return f"{command}begin\n{part.latex}\n{command}end"
+    command, color = (r"\DIFdel", "red") if deleted else (r"\DIFadd", "blue")
+    return f"{command}begin\n\\begingroup\\color{{{color}}}\n{part.latex}\n\\endgroup\n{command}end"
 
 
 def _render_list_parts(
@@ -627,11 +627,8 @@ def _render_list_parts(
 def _render_list(
     ctx: _Ctx, block: ast.ListBlock, *, deleted: bool, inserted: bool = False
 ) -> str:
-    parts, plain, starts = _list_parts(ctx, block)
-    deleted_items = set(starts) if deleted and starts and parts[0] == r"\begin{enumerate}" else ()
-    rendered = _render_list_parts(
-        parts, deleted=deleted, inserted=inserted, deleted_enumerated_items=deleted_items,
-    )
+    parts, plain, _ = _list_parts(ctx, block)
+    rendered = _render_list_parts(parts, deleted=deleted, inserted=inserted)
     if deleted:
         return rendered
     _record(ctx, block, "list", " ".join(" ".join(plain).split()))
@@ -1006,24 +1003,48 @@ def _render_marked_pair(old: _Ctx, old_block: ast.Block, ctx: _Ctx, block: ast.B
 
 
 def _diff_list_item(old: Sequence[_ListPart], new: Sequence[_ListPart]) -> str | None:
-    if len(old) != len(new):
-        return None
-    rendered = []
-    for before, after in zip(old, new):
-        if isinstance(before, list) and isinstance(after, list):
-            rendered.append(_diff_tokens(before, after, float_mode=False))
-        elif isinstance(before, _ListLiteral) and isinstance(after, _ListLiteral):
-            if before == after:
-                rendered.append(after.latex)
-            else:
-                rendered.extend((
-                    _mark_list_literal(before, deleted=True), _mark_list_literal(after, deleted=False)
-                ))
-        elif isinstance(before, str) and before == after:
-            rendered.append(before)
-        else:
+    def _part_key(part: _ListPart) -> str:
+        if isinstance(part, str):
+            return part
+        if isinstance(part, _ListLiteral):
+            return part.latex
+        return _join(part)
+
+    def _has_env_boundary(parts: Sequence[_ListPart]) -> bool:
+        return any(
+            isinstance(part, str) and part.startswith((r"\begin{", r"\end{", r"\setcounter{"))
+            for part in parts
+        )
+
+    rendered = [r"\item"]
+    old_body, new_body = old[1:], new[1:]
+    old_keys = [_part_key(part) for part in old_body]
+    new_keys = [_part_key(part) for part in new_body]
+    for op, i, j, k, last in SequenceMatcher(None, old_keys, new_keys, autojunk=False).get_opcodes():
+        if op == "equal":
+            rendered.extend(new_keys[k:last])
+            continue
+        if _has_env_boundary(old_body[i:j]) or _has_env_boundary(new_body[k:last]):
             return None
-    return "\n".join(rendered)
+        if op == "replace" and j - i == last - k and all(
+            type(before) is type(after) for before, after in zip(old_body[i:j], new_body[k:last])
+        ):
+            for before, after in zip(old_body[i:j], new_body[k:last]):
+                if isinstance(before, list) and isinstance(after, list):
+                    rendered.append(_diff_tokens(before, after, float_mode=False))
+                elif isinstance(before, _ListLiteral) and isinstance(after, _ListLiteral):
+                    rendered.extend((
+                        _mark_list_literal(before, deleted=True),
+                        _mark_list_literal(after, deleted=False),
+                    ))
+                else:
+                    return None
+            continue
+        if op in {"delete", "replace"}:
+            rendered.append(_render_list_parts(old_body[i:j], deleted=True))
+        if op in {"insert", "replace"}:
+            rendered.append(_render_list_parts(new_body[k:last], inserted=True))
+    return "\n".join(part for part in rendered if part)
 
 
 def _render_marked_list(
@@ -1363,9 +1384,28 @@ def _asset_plan(
         old_assets: set[str] = set()
     else:
         old_assets = _referenced_assets(milestone, old_sources)
+    global_new_folded = {item.casefold(): item for item in global_new_assets}
+    folded_occupied = {
+        *(item.casefold() for item in snapshot.assets),
+        *(item.casefold() for item in (milestone.assets if milestone is not None else ())),
+    }
     for path in sorted(old_assets | new_assets):
         if path in global_new_assets:
             data = snapshot.assets[path]
+        elif (canonical := global_new_folded.get(path.casefold())) is not None:
+            previous = milestone.assets[path]
+            if previous == snapshot.assets[canonical]:
+                alias[path] = canonical
+                continue
+            digest = hashlib.sha256(previous).hexdigest()[:8]
+            parent, _, name = path.rpartition("/")
+            archived = (Path(parent) / f".omm_old_{digest}_{name}").as_posix()
+            while archived.casefold() in folded_occupied:
+                archived = (Path(parent) / f".omm_old_{Path(archived).name}").as_posix()
+            folded_occupied.add(archived.casefold())
+            alias[path] = archived
+            writes[archived] = previous
+            continue
         else:
             # The figure is gone in the target revision; keep the milestone bytes.
             data = milestone.assets[path]
@@ -1379,8 +1419,9 @@ def _asset_plan(
         digest = hashlib.sha256(previous).hexdigest()[:8]
         parent, _, name = path.rpartition("/")
         archived = (Path(parent) / f".omm_old_{digest}_{name}").as_posix()
-        while archived in snapshot.assets or archived in milestone.assets:
+        while archived.casefold() in folded_occupied:
             archived = (Path(parent) / f".omm_old_{Path(archived).name}").as_posix()
+        folded_occupied.add(archived.casefold())
         alias[path] = archived
         writes[path] = data
         writes[archived] = previous

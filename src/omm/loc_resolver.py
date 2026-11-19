@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import unicodedata
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import groupby, pairwise
 from math import hypot
@@ -390,6 +390,16 @@ def _match_equation(
         if (observed - expected.characters).keys() - _MATH_DELIMITERS:
             break
         if found_number and expected.characters <= observed:
+            if index + 1 < len(lines):
+                following = lines[index + 1]
+                if (
+                    following.page == line.page
+                    and following.number is None
+                    and following.equation_number is None
+                    and not following.page_furniture
+                    and 0 <= line.y - following.y <= 0.5 * max(line.size, following.size)
+                ):
+                    continue
             # A flat equation can also be checked in left-to-right order.
             if (
                 index == start
@@ -401,24 +411,56 @@ def _match_equation(
     return ()
 
 
-def _block_matches(
-    lines: list[_VisualLine], block: BlockRecordLike, expected: str,
-) -> list[tuple[int, ...]]:
-    if block.kind == "display_math":
-        equation = _EquationText.from_record(block.plain_text)
-        return [
-            match for index in range(len(lines)) if (match := _match_equation(lines, index, equation))
-        ]
-    return [
-        match for index in range(len(lines))
-        if (match := _match_lines(lines, index, expected, block.kind))
-    ]
+def _match_at(
+    lines: list[_VisualLine],
+    index: int,
+    kind: str,
+    expected: str,
+    equation: _EquationText | None,
+) -> tuple[int, ...]:
+    if equation is not None:
+        return _match_equation(lines, index, equation)
+    return _match_lines(lines, index, expected, kind)
+
+
+def _next_match(
+    lines: list[_VisualLine],
+    start: int,
+    kind: str,
+    expected: str,
+    equation: _EquationText | None,
+) -> tuple[int, ...]:
+    for index in range(start, len(lines)):
+        if matched := _match_at(lines, index, kind, expected, equation):
+            return matched
+    return ()
+
+
+def _can_finish(
+    lines: list[_VisualLine],
+    cursor: int,
+    remaining: Sequence[tuple[str, str, _EquationText | None]],
+) -> bool:
+    for kind, expected, equation in remaining:
+        matched = _next_match(lines, cursor, kind, expected, equation)
+        if not matched:
+            return False
+        cursor = matched[-1] + 1
+    return True
+
+
+def _is_numbered_match(lines: list[_VisualLine], matched: tuple[int, ...], kind: str) -> bool:
+    numbered = (lines[i].number is not None for i in matched)
+    return any(numbered) if kind == "display_math" else all(numbered)
 
 
 def _align_block(
     lines: list[_VisualLine],
-    feasible: Iterable[tuple[int, ...]],
+    cursor: int,
     block: BlockRecordLike,
+    expected: str,
+    equation: _EquationText | None,
+    remaining: Sequence[tuple[str, str, _EquationText | None]],
     anchors: dict[str, tuple[int, float | None]],
 ) -> tuple[int, ...]:
     start = anchors.get(getattr(block, "start_bookmark", None))
@@ -427,16 +469,22 @@ def _align_block(
         start = anchors.get(getattr(block, "start_linelabel", None))
     if end is None:
         end = anchors.get(getattr(block, "end_linelabel", None))
-    unnumbered = ()
+    if start is None and end is None:
+        first = _next_match(lines, cursor, block.kind, expected, equation)
+        if not first or _is_numbered_match(lines, first, block.kind):
+            return first
+        probe = first[0] + 1
+        while matched := _next_match(lines, probe, block.kind, expected, equation):
+            if _is_numbered_match(lines, matched, block.kind):
+                return matched if _can_finish(lines, matched[-1] + 1, remaining) else first
+            probe = matched[0] + 1
+        return first
+
     best = ()
     best_distance = (float("inf"), float("inf"))
-    for matched in feasible:
-        if start is None and end is None:
-            numbered = (lines[i].number is not None for i in matched)
-            if (any(numbered) if block.kind == "display_math" else all(numbered)):
-                return matched
-            if not unnumbered:
-                unnumbered = matched
+    for index in range(cursor, len(lines)):
+        matched = _match_at(lines, index, block.kind, expected, equation)
+        if not matched:
             continue
         endpoints = ((lines[matched[0]], start), (lines[matched[-1]], end))
         distance = (
@@ -447,11 +495,11 @@ def _align_block(
                 if anchor and line.page == anchor[0] and anchor[1] is not None
             ),
         )
-        if distance == (0, 0):
-            return matched
-        if distance < best_distance:
+        if distance < best_distance and _can_finish(lines, matched[-1] + 1, remaining):
             best, best_distance = matched, distance
-    return best or unnumbered
+            if distance == (0, 0):
+                return best
+    return best
 
 
 def resolve_blocks_from_pdf(
@@ -473,36 +521,29 @@ def resolve_blocks_from_pdf(
         # pypdf also raises built-in exceptions for some malformed PDF objects.
         raise OmmError("ERR_LAYOUT_PDF_INVALID", deliverable=deliverable, detail=str(exc)) from exc
 
-    def unmatched(block: BlockRecordLike) -> OmmError:
-        return OmmError(
-            "ERR_LAYOUT_PDF_INVALID",
-            deliverable=deliverable,
-            detail=f"Could not match the text of block {block.block_id}.",
+    prepared = [
+        (
+            block,
+            expected,
+            _EquationText.from_record(block.plain_text) if block.kind == "display_math" else None,
         )
-
-    candidates = []
-    for block in blocks:
-        if expected := _normalize(block.plain_text):
-            matches = _block_matches(lines, block, expected)
-            if not matches:
-                raise unmatched(block)
-            candidates.append((block, matches))
-
-    # Reserve enough room for every remaining block before preferring numbered lines or anchors.
-    limits = [len(lines) - 1] * len(candidates)
-    for index in range(len(candidates) - 2, -1, -1):
-        next_matches = candidates[index + 1][1]
-        limits[index] = max(
-            (match[0] for match in next_matches if match[-1] <= limits[index + 1]), default=-1
-        ) - 1
+        for block in blocks
+        if (expected := _normalize(block.plain_text))
+    ]
+    specs = [(block.kind, expected, equation) for block, expected, equation in prepared]
 
     spans = {}
     cursor = 0
-    for (block, matches), limit in zip(candidates, limits):
-        feasible = (match for match in matches if cursor <= match[0] and match[-1] <= limit)
-        indices = _align_block(lines, feasible, block, anchors)
+    for position, (block, expected, equation) in enumerate(prepared):
+        indices = _align_block(
+            lines, cursor, block, expected, equation, specs[position + 1 :], anchors
+        )
         if not indices:
-            raise unmatched(block)
+            raise OmmError(
+                "ERR_LAYOUT_PDF_INVALID",
+                deliverable=deliverable,
+                detail=f"Could not match the text of block {block.block_id}.",
+            )
         cursor = indices[-1] + 1
         segments = []
         for page, group in groupby((lines[i] for i in indices), key=lambda line: line.page):

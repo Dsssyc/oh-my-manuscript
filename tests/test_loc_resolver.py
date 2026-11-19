@@ -399,6 +399,38 @@ def test_pdf_rejects_display_equations_with_different_operators(tmp_path, source
     assert caught.value.diagnostic.params["detail"] == "Could not match the text of block eq-1."
 
 
+def test_pdf_rejects_lowered_radical_and_scales_linearly_to_large_manuscripts(tmp_path):
+    import time
+
+    snapshot = _snapshot(tmp_path, "$$\nx\n$$ {#eq-1}\n")
+    clean = compile_docx_workspace(snapshot, tmp_path / "build", deliverables=["main"])["main"]
+    lowered = _pdf(
+        tmp_path / "lowered.pdf",
+        [[(42, 700, "7"), (200, 700, "x"), (526, 700, "(1)"), (192, 696, "√")]],
+    )
+    with pytest.raises(OmmError, match="ERR_LAYOUT_PDF_INVALID"):
+        resolve_blocks_from_pdf(lowered, clean.blocks, deliverable="main")
+
+    pages = []
+    records = []
+    line_no = 1
+    for page_idx in range(75):
+        rows = []
+        for row_idx in range(40):
+            text = f"Paragraph {page_idx}-{row_idx} hydrological storage."
+            y = 750 - row_idx * 16
+            rows.extend(((42, y, str(line_no)), (75, y, text)))
+            records.append(_record(f"p-{line_no}", text))
+            line_no += 1
+        pages.append(rows)
+    large_pdf = _pdf(tmp_path / "large.pdf", pages)
+    started = time.perf_counter()
+    spans = resolve_blocks_from_pdf(large_pdf, records, deliverable="main")
+    elapsed = time.perf_counter() - started
+    assert len(spans) == 3000 and spans["p-3000"] == LineSpan(75, 3000, 75, 3000, ((75, 3000, 3000),))
+    assert elapsed < 2.0
+
+
 @pytest.mark.parametrize("shared_text_object", [False, True])
 def test_pdf_locates_prose_with_raised_and_lowered_inline_math(tmp_path, shared_text_object):
     snapshot = _snapshot(

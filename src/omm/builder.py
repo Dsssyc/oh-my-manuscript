@@ -73,6 +73,10 @@ def _workspace_output_parts(
     directory: Path, root: Path, *, reject_ancestors: bool = False,
 ) -> tuple[str, ...] | None:
     """Find workspace-relative parts, with an empty tuple for protected directories."""
+    if not fs_path(root).exists():
+        if reject_ancestors and root.is_relative_to(directory):
+            return ()
+        return directory.relative_to(root).parts if directory.is_relative_to(root) else None
     probe = directory
     while not fs_path(probe).exists():
         if probe == probe.parent:

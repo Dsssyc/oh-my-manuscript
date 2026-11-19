@@ -748,18 +748,26 @@ def test_marked_deleted_reference_has_no_dangling_link(repo, tmp_path):
 
 def test_marked_ordered_list_diffs_code_inside_one_item(repo, tmp_path):
     def source(code):
-        return (
-            f"1. Step\n\n   ~~~python\n   {code}()\n   ~~~\n\n"
-            "2. Finish. {#li-steps}\n"
-        )
+        body = f"\n\n   ~~~python\n   {code}()\n   ~~~\n\n" if code else "\n"
+        return f"1. Step{body}2. Finish. {{#li-steps}}\n"
 
     old, new = two_revisions(repo, {INTRO: source("alpha")}, {INTRO: source("beta")})
     artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
     marked = artifact.marked_path.read_text(encoding="utf-8")
     assert marked.count("\\item\n") == 2
-    assert "\\item\nStep\n\\par\n\\DIFdelbegin\n\\begin{verbatim}\nalpha()\n" in marked
-    assert "\\end{verbatim}\n\\DIFdelend\n\\DIFaddbegin\n\\begin{verbatim}\nbeta()\n" in marked
-    assert "\\end{verbatim}\n\\DIFaddend\n\\item\nFinish.\n" in marked
+    assert (
+        "\\item\nStep\n\\par\n\\DIFdelbegin\n\\begingroup\\color{red}\n"
+        "\\begin{verbatim}\nalpha()\n\\end{verbatim}\n\\endgroup\n\\DIFdelend\n"
+        "\\DIFaddbegin\n\\begingroup\\color{blue}\n"
+        "\\begin{verbatim}\nbeta()\n\\end{verbatim}\n\\endgroup\n\\DIFaddend\n\\item\nFinish.\n"
+    ) in marked
+
+    added_old, added_new = two_revisions(repo, {INTRO: source(None)}, {INTRO: source("alpha")})
+    added_marked = compile_marked(
+        repo, tmp_path / "added", added_old.revision, added_new.revision
+    )["manuscript"].marked_path.read_text(encoding="utf-8")
+    assert added_marked.count("\\item\n") == 2
+    assert "\\item\nStep\n\\par\n\\DIFaddbegin\n\\begingroup\\color{blue}\n" in added_marked
 
 
 @pytest.mark.parametrize("deleted", [True, False])
@@ -776,10 +784,28 @@ def test_marked_ordered_item_marks_code_and_math(repo, tmp_path, deleted):
     artifact = compile_marked(repo, tmp_path, old.revision, new.revision)["manuscript"]
     marked = artifact.marked_path.read_text(encoding="utf-8")
     assert (r"\item\addtocounter{enumi}{-1}" in marked) == deleted
-    dif = "\\DIFdel" if deleted else "\\DIFadd"
-    assert f"{dif}begin\n\\begin{{verbatim}}\nalpha()\n\\end{{verbatim}}\n{dif}end\n" in marked
-    assert re.search(re.escape(dif + "begin\n\\[") + r"\s*x = 1\s*" + re.escape(r"\]"), marked)
-    assert f"\\]\n{dif}end\n\\item\nFinish.\n" in marked
+    dif, color = ("\\DIFdel", "red") if deleted else ("\\DIFadd", "blue")
+    assert (
+        f"{dif}begin\n\\begingroup\\color{{{color}}}\n"
+        f"\\begin{{verbatim}}\nalpha()\n\\end{{verbatim}}\n\\endgroup\n{dif}end\n"
+    ) in marked
+    assert re.search(
+        re.escape(f"{dif}begin\n\\begingroup\\color{{{color}}}\n\\[")
+        + r"\s*x = 1\s*"
+        + re.escape(f"\\]\n\\endgroup\n{dif}end\n\\item\nFinish.\n"),
+        marked,
+    )
+
+    whole_old, whole_new = two_revisions(
+        repo,
+        {INTRO: "3. Third.\n4. Fourth.\n5. Fifth. {#li-whole}\n"},
+        {INTRO: "Replacement paragraph. {#p-next}\n"},
+    )
+    whole_marked = compile_marked(
+        repo, tmp_path / "whole", whole_old.revision, whole_new.revision
+    )["manuscript"].marked_path.read_text(encoding="utf-8")
+    assert r"\setcounter{enumi}{2}" in whole_marked
+    assert r"\addtocounter{enumi}{-1}" not in whole_marked
 
 
 def test_marked_inserted_content_and_changed_panel_caption(repo, tmp_path):
@@ -849,6 +875,35 @@ def test_shared_new_asset_wins_over_deleted_figure(repo, tmp_path):
     assert archived in artifacts["appendix"].asset_paths
     marked = artifacts["appendix"].marked_path.read_text(encoding="utf-8")
     assert f"figures/{archived.name}" in marked
+
+
+def test_casefold_shared_asset_archives_deleted_old_image_without_overwriting_new(repo, tmp_path):
+    stage(
+        repo, manifest({"main": ("manuscript", [INTRO]), "appendix": ("supplementary", [APPENDIX])}),
+        {
+            "references.bib": "",
+            INTRO: "Text. {#p-main}\n",
+            APPENDIX: ":::{figure} {#fig-old}\n![Old](FIGURES/map.png)\n\nOld.\n:::\n",
+        },
+        {"FIGURES/map.png": b"old-bytes"},
+    )
+    old = snapshot_at(repo, publish(repo))
+    stage(
+        repo, manifest({"main": ("manuscript", [INTRO]), "appendix": ("supplementary", [APPENDIX])}),
+        {
+            "references.bib": "",
+            INTRO: ":::{figure} {#fig-new}\n![New](figures/map.png)\n\nNew.\n:::\n",
+            APPENDIX: "Removed. {#p-removed}\n",
+        },
+        {"figures/map.png": b"new-bytes"},
+    )
+    new = snapshot_at(repo, publish(repo))
+    out_dir = tmp_path / "build"
+    artifacts = compile_latex_workspace(new, out_dir, milestone=old)
+    assert (out_dir / "figures/map.png").read_bytes() == b"new-bytes"
+    [archived] = artifacts["appendix"].asset_paths
+    assert archived.read_bytes() == b"old-bytes"
+    assert archived.name in artifacts["appendix"].marked_path.read_text(encoding="utf-8")
 
 
 def test_inline_images_render_alt_text_without_exporting_assets(repo, tmp_path):
