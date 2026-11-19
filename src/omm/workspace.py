@@ -445,9 +445,10 @@ def init_workspace(
                 raise OmmError("ERR_GIT_INIT", path=root) from exc
         ignore = workspace.resolve(".gitignore")
         prior = read_text(ignore) if ignore.exists() else ""
-        if prior.rstrip("\n").split("\n")[-1] not in {".omm/cache/", "/.omm/cache/"}:
+        rules = ("/.omm/cache/", "/.omm/build/")
+        if tuple(prior.splitlines()[-len(rules):]) != rules:
             prefix = prior if not prior or prior.endswith("\n") else prior + "\n"
-            atomic_write_text(ignore, prefix + "/.omm/cache/\n")
+            atomic_write_text(ignore, prefix + "\n".join(rules) + "\n")
         toml_title = json.dumps(title, ensure_ascii=False).replace("\x7f", r"\u007f")
         source = (
             f'workspace_id = "{workspace.workspace_id}"\n'

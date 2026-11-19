@@ -16,7 +16,7 @@ English | [简体中文](./README.zh-CN.md)
 
 ---
 
-## Planned `0.1` Workflow
+## `0.1` Workflow
 
 `oh-my-manuscript` installs once into a shared global Agent Skill (`~/.agents/skills/oh-my-manuscript`, with automatic directory links for installed coding agents and a single-instance loopback workbench at `127.0.0.1:49638`), while keeping every paper's **Manuscript Workspace** self-contained inside its own Git repository:
 
@@ -33,9 +33,13 @@ See [docs/GLOSSARY.md](./docs/GLOSSARY.md) for canonical bilingual domain terms,
 
 ## Project Status & Verification Boundary
 
-> **Status (`0.1.0-dev` — Core Contracts Adopted, Implementation Pending)**:
-> - **Implemented & Verified**: Python package & `omm` CLI skeleton (`uv` + `pytest`), bilingual (`en` / `zh-CN`) i18n catalog, five-tab Vite + React + TypeScript workbench shell (`tsc` + build), and foundational architecture contracts (`ADR-001` & `ADR-002`).
-> - **Not Yet Implemented (`0.1` Roadmap)**: Shared Skill installer & single-instance loopback daemon, Structured Source AST parser & `(revision, block_id)` `sync` engine, `.omm/annotations.json` store & Git Checkpoint diff engine, and Word (`.docx` OOXML/OMML/Track Changes) & LaTeX (`.tex`) Target Compilers. Legacy external `.docx` ingestion (`ingest`) is deferred to `0.2`.
+The `0.1` workflow is implemented in source and covered by headless automated checks. It includes Structured Source parsing, validation, and stamping, explicit `omm sync`, three levels of Checkpoint diffs, the five-view workbench, and a global shared Skill with a windowless loopback daemon. `omm build` generates Clean and Marked Word `.docx` and LaTeX `.tex` deliverables, with page and line numbers for `[#loc:...]` in response letters.
+
+When a location reference has no supplied `--layout-pdf`, the Word target requires headless LibreOffice (`soffice`) and the LaTeX target requires a TeX engine. The end-to-end test uses a PDF with printed margin line numbers to exercise the same location resolver without those engines.
+
+Word outputs are checked by the built-in strict OOXML validator. The acceptance fixture's Word XML parts were checked against the official ECMA-376 schemas, and automated tests compare the accepted and rejected revisions with their respective Clean documents. Review fonts, pagination, and revision behavior in desktop Microsoft Word before submission. [ECMA-376](https://ecma-international.org/publications-and-standards/standards/ecma-376/)
+
+Legacy `.docx` ingestion (`ingest`) is planned for `0.2`.
 
 ---
 

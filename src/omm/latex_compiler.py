@@ -21,10 +21,17 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from omm import ast
+from omm.docx_compiler import _visible_text
 from omm.errors import OmmError
 from omm.git_revs import RevisionSnapshot
 from omm.numbering import BlockNumber, NumberedReference, NumberedWorkspace, number_workspace
-from omm.omml import _NUMBERED_ENVS, _TAG_RE
+from omm.omml import (
+    _NUMBERED_ENVS,
+    _TAG_RE,
+    OmmlConversionError,
+    build_numbered_equation_paragraph,
+    latex_to_omml,
+)
 from omm.parser import _markdown
 from omm.workspace import DeliverableKind, Style, Workspace, atomic_write_text
 
@@ -138,6 +145,7 @@ class _Ctx:
     lineno: bool
     record: bool
     loc_labels: Mapping[tuple[str, str | None], str]
+    pdf_layout: bool = False
     local_blocks: frozenset[str] = frozenset()
     local_citations: frozenset[str] = frozenset()
     asset_alias: Mapping[str, str] = field(default_factory=dict)
@@ -357,7 +365,7 @@ def _plain(ctx: _Ctx, nodes: tuple[ast.Inline, ...]) -> str:
             case ast.LineBreak():
                 parts.append(" ")
             case ast.InlineMath(latex=latex):
-                parts.append(latex)
+                parts.append(_visible_text(latex_to_omml(latex)) if ctx.pdf_layout else latex)
             case ast.Link() | ast.Strong() | ast.Emphasis() | ast.Subscript() | ast.Superscript():
                 parts.append(_plain(ctx, node.children))
             case ast.Image(alt=alt):
@@ -482,7 +490,11 @@ def _render_heading(
     # Deleted headings use starred forms so they never advance section counters.
     if deleted or ctx.kind == "response_letter":
         return f"\\{command}*{{{title}}}"
-    _record(ctx, block, "heading", _plain(ctx, block.inlines))
+    text = _plain(ctx, block.inlines)
+    number = ctx.numbered.block_numbers[ctx.name].get(block.block_id)
+    if ctx.pdf_layout and number is not None:
+        text = f"{number.number} {text}"
+    _record(ctx, block, "heading", text)
     start, end = _line_marks(ctx, block.block_id)
     return f"{start}\\{command}{{{title}}}{_block_label(ctx, block.block_id)}{end}"
 
@@ -558,7 +570,15 @@ def _render_equation(ctx: _Ctx, block: ast.DisplayMath, *, deleted: bool) -> str
     # _render_deleted supplies the surrounding DIFdelbegin/DIFdelend markers.
     if deleted:
         return f"\\[{latex}\\]"
-    _record(ctx, block, "display_math", " ".join(latex.split()))
+    if ctx.pdf_layout:
+        number = ctx.numbered.block_numbers[ctx.name].get(block.block_id)
+        equation = build_numbered_equation_paragraph(
+            latex, number.number if number else None, block_id=block.block_id
+        )
+        text = _visible_text(equation)
+    else:
+        text = " ".join(latex.split())
+    _record(ctx, block, "display_math", text)
     start, end = _line_marks(ctx, block.block_id)
     if block.unnumbered:
         return f"{start}{_block_label(ctx, block.block_id)}\\[{latex}\\]{end}"
@@ -1225,7 +1245,7 @@ def _labeled_blocks(snapshot: RevisionSnapshot, sources: Sequence[str]) -> froze
     ids = set()
     for source in sources:
         for block in ast.walk_blocks(snapshot.documents[source].blocks):
-            if block.block_id is not None and not isinstance(block, ast.ReviewItem):
+            if block.block_id is not None and not isinstance(block, (ast.OutlineBlock, ast.ReviewItem)):
                 ids.add(block.block_id)
     return frozenset(ids)
 
@@ -1237,6 +1257,7 @@ def compile_latex_workspace(
     milestone: RevisionSnapshot | None = None,
     loc_labels: Mapping[tuple[str, str | None], str] | None = None,
     deliverables: Collection[str] | None = None,
+    pdf_deliverables: Collection[str] = (),
 ) -> dict[str, CompiledLatexDeliverable]:
     """Compile deliverables of ``snapshot`` into deterministic ``.tex`` files."""
     _validate_math(snapshot)
@@ -1282,7 +1303,8 @@ def compile_latex_workspace(
             lineno=lineno,
             record=lineno,
             loc_labels=labels,
-            local_blocks=_labeled_blocks(snapshot, deliverable.sources),
+            pdf_layout=lineno and name in pdf_deliverables,
+            local_blocks=_labeled_blocks(snapshot, deliverable.sources) if lineno else frozenset(),
             local_citations=frozenset(keys),
         )
         parts = []
@@ -1290,7 +1312,13 @@ def compile_latex_workspace(
             document = snapshot.documents[source]
             ctx.document = document
             for block in document.blocks:
-                rendered = _render_block(ctx, block)
+                try:
+                    rendered = _render_block(ctx, block)
+                except OmmlConversionError as exc:
+                    raise OmmError(
+                        exc.code, path=document.path, line=block.line,
+                        block_id=block.block_id, detail=exc.message,
+                    ) from exc
                 if rendered:
                     parts.append(rendered)
         body = "\n\n".join(parts)
@@ -1313,12 +1341,11 @@ def compile_latex_workspace(
                 lineno=False,
                 record=False,
                 loc_labels={},
-                local_blocks=_labeled_blocks(milestone, old_deliverable.sources),
                 local_citations=frozenset(old_keys),
                 asset_alias=alias,
             )
             # The Marked pass must not append to the Clean block records.
-            marked_ctx = replace(ctx, record=False, records=[])
+            marked_ctx = replace(ctx, record=False, pdf_layout=False, records=[])
             marked_body = _marked_body(old_ctx, marked_ctx)
             marked_bibliography = _bibliography(marked_ctx, keys, old=old_ctx, old_keys=old_keys)
             marked_path = out_dir / f"{name}.marked.tex"

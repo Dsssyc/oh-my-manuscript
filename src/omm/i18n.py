@@ -382,6 +382,30 @@ _CLI_MESSAGES = {
     "cli.stamped": ("Assigned {count} block IDs.", "已分配 {count} 个块标识。"),
     "cli.check_ok": ("Workspace checks passed.", "手稿工作区检查通过。"),
     "cli.json_help": ("Print the result as JSON.", "以 JSON 输出结果。"),
+    "cli.build_target_help": (
+        "Output format (default: all).",
+        "输出格式（默认 all，即 Word 和 LaTeX）。",
+    ),
+    "cli.build_out_dir_help": (
+        "Output directory relative to the invocation directory (default: Workspace .omm/build).",
+        "相对路径从命令调用目录解析（默认手稿工作区的 .omm/build）。",
+    ),
+    "cli.build_revision_help": (
+        "Git revision to compile (default: refs/omm/published, with no unsynced changes).",
+        "要构建的 Git 版本（默认 refs/omm/published，要求源稿已同步）。",
+    ),
+    "cli.build_milestone_help": (
+        "Revision for Marked output (default: latest ancestral v*-submitted tag, if any).",
+        "修订稿的投稿里程碑（默认选择最新的祖先 v*-submitted 标签，如有）。",
+    ),
+    "cli.build_layout_pdf_help": (
+        "Numbered PDF of a Clean deliverable (repeat for each layout).",
+        "指定带页边行号的 Clean 产物 PDF（可多次指定）。",
+    ),
+    "cli.build_done": (
+        "Built revision {revision} in {out_dir}.",
+        "已将版本 {revision} 的投稿产物写入 {out_dir}。",
+    ),
     "cli.expected_rev_help": (
         "Expected current published revision.",
         "预期的当前已发布版本。",
